@@ -1,0 +1,322 @@
+import asyncio
+import logging
+
+from aiogram import Router, types, Bot
+from aiogram.filters import Command, CommandObject
+from aiogram.exceptions import (
+    TelegramRetryAfter,
+    TelegramForbiddenError,
+    TelegramBadRequest,
+)
+
+from utils import is_admin, get_admin_ids
+from database.db import get_seen_users
+from forum_topics import delete_all_topics_except
+
+
+logger = logging.getLogger(__name__)
+router = Router()
+
+
+@router.message(Command("exterminatus"))
+async def cmd_ext(
+    message: types.Message,
+    command: CommandObject,
+    bot: Bot,
+):
+    # ============================================================
+    # ПРОВЕРКА АДМИНИСТРАТОРА
+    # ============================================================
+
+    if not message.from_user:
+        return
+
+    if not await is_admin(
+        bot,
+        message.chat.id,
+        message.from_user.id,
+    ):
+        return await message.reply(
+            "<b>ORDO INQUISITIONIS</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>ДОСТУП ЗАПРЕЩЁН</b>\n\n"
+            "Данная директива доступна только\n"
+            "авторизованному персоналу."
+        )
+
+    # ============================================================
+    # ПРОВЕРКА ПОДТВЕРЖДЕНИЯ
+    # ============================================================
+
+    if not command.args or command.args.strip().lower() != "confirm":
+        return await message.reply(
+            "<b>ORDO INQUISITIONIS</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>EXTERMINATUS</b>\n\n"
+            "Класс протокола: <b>EXTREMIS</b>\n"
+            "Статус: <b>ОЖИДАНИЕ ПОДТВЕРЖДЕНИЯ</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "<b>ОБНАРУЖЕНА ЕРЕСЬ</b>\n\n"
+            "Сектор признан заражённым.\n"
+            "Инквизиция санкционирует полное\n"
+            "очищение сектора.\n\n"
+            "Все обнаруженные в реестре\n"
+            "субъекты, кроме авторизованного\n"
+            "персонала, будут подвергнуты\n"
+            "окончательному изгнанию.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>ДИРЕКТИВА</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Для активации протокола введите:\n"
+            "<code>/ext confirm</code>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<i>«Ересь требует очищения.\n"
+            "Очищение требует огня.»</i>"
+        )
+
+    # ============================================================
+    # ОСНОВНЫЕ ДАННЫЕ
+    # ============================================================
+
+    chat_id = message.chat.id
+
+    # ID форумной ветки, в которой была написана команда.
+    #
+    # Для обычного сообщения в General значение обычно будет None
+    # или соответствующее Telegram-значение.
+    #
+    # Если команда написана внутри конкретной темы форума,
+    # здесь будет её message_thread_id.
+    keep_topic_id = message.message_thread_id
+
+    logger.info(
+        "Запущен EXTERMINATUS: chat_id=%s, keep_topic_id=%s",
+        chat_id,
+        keep_topic_id,
+    )
+
+    # ============================================================
+    # СТАТУС ОПЕРАЦИИ
+    # ============================================================
+
+    status_msg = await message.reply(
+        "<b>ORDO INQUISITIONIS</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>EXTERMINATUS</b>\n\n"
+        "Авторизация: <b>ПОДТВЕРЖДЕНА</b>\n"
+        "Приоритет: <b>АБСОЛЮТНЫЙ</b>\n"
+        "Статус: <b>ВЫПОЛНЕНИЕ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Орбитальная группа возмездия\n"
+        "выходит на позицию.\n\n"
+        "Сканирование реестра...\n"
+        "Идентификация субъектов...\n"
+        "Синхронизация форумных веток...\n\n"
+        "<b>ОГОНЬ РАЗРЕШЁН.</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>«Во имя Императора.»</i>"
+    )
+
+    # ============================================================
+    # АДМИНИСТРАТОРЫ
+    # ============================================================
+
+    admin_ids = await get_admin_ids(
+        bot,
+        chat_id,
+    )
+
+    # Сам бот также должен быть исключён из бана.
+    try:
+        me = await bot.get_me()
+        admin_ids.add(me.id)
+    except Exception:
+        logger.exception("Не удалось получить ID бота")
+
+    # ============================================================
+    # УДАЛЕНИЕ ФОРУМНЫХ ВЕТОК
+    # ============================================================
+
+    topics_total = 0
+    topics_deleted = 0
+    topics_errors = 0
+
+    try:
+        (
+            topics_total,
+            topics_deleted,
+            topics_errors,
+        ) = await delete_all_topics_except(
+            bot=bot,
+            chat_id=chat_id,
+            keep_topic_id=keep_topic_id,
+        )
+
+        logger.info(
+            "Форумные ветки обработаны: всего=%s, удалено=%s, ошибок=%s",
+            topics_total,
+            topics_deleted,
+            topics_errors,
+        )
+
+    except Exception as e:
+        logger.exception(
+            "Ошибка синхронизации/удаления форумных веток: %s",
+            e,
+        )
+
+        topics_errors = 1
+
+    # ============================================================
+    # ПОЛУЧЕНИЕ ЗАРЕГИСТРИРОВАННЫХ ПОЛЬЗОВАТЕЛЕЙ
+    # ============================================================
+
+    users = await get_seen_users(chat_id)
+
+    total = len(users)
+    banned = 0
+    skipped = 0
+    errors = 0
+
+    # ============================================================
+    # БАН ПОЛЬЗОВАТЕЛЕЙ
+    # ============================================================
+
+    for user_id in users:
+
+        # Администраторов и самого бота не трогаем.
+        if user_id in admin_ids:
+            skipped += 1
+            continue
+
+        success = False
+        attempts = 0
+
+        while attempts < 2 and not success:
+
+            try:
+                await bot.ban_chat_member(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                )
+
+                banned += 1
+                success = True
+
+                logger.info(
+                    "Пользователь %s исключён из чата %s",
+                    user_id,
+                    chat_id,
+                )
+
+            except TelegramRetryAfter as e:
+                wait = e.retry_after
+
+                logger.warning(
+                    "FloodWait %s секунд на user_id=%s",
+                    wait,
+                    user_id,
+                )
+
+                await asyncio.sleep(wait)
+                attempts += 1
+
+            except (
+                TelegramForbiddenError,
+                TelegramBadRequest,
+            ) as e:
+
+                logger.warning(
+                    "Не удалось исключить user_id=%s: %s",
+                    user_id,
+                    e,
+                )
+
+                errors += 1
+                break
+
+            except Exception as e:
+
+                logger.exception(
+                    "Ошибка бана пользователя %s: %s",
+                    user_id,
+                    e,
+                )
+
+                errors += 1
+                break
+
+        # Если обе попытки закончились FloodWait.
+        if not success and attempts >= 2:
+            errors += 1
+
+        # Небольшая задержка между операциями.
+        if success:
+            await asyncio.sleep(0.25)
+
+    # ============================================================
+    # ФИНАЛЬНЫЙ ОТЧЁТ
+    # ============================================================
+
+    if keep_topic_id is None:
+        kept_topic_text = "General / текущая тема не определена"
+    elif keep_topic_id == 1:
+        kept_topic_text = "General"
+    else:
+        kept_topic_text = f"ID {keep_topic_id}"
+
+    text = (
+        "<b>ORDO INQUISITIONIS</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>EXTERMINATUS — FINAL REPORT</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "<b>СТАТУС ОПЕРАЦИИ</b>\n"
+        "ЗАВЕРШЕНО\n\n"
+
+        "<b>ФОРУМНЫЕ ВЕТКИ</b>\n\n"
+        f"Найдено: <b>{topics_total}</b>\n"
+        f"Удалено: <b>{topics_deleted}</b>\n"
+        f"Ошибок: <b>{topics_errors}</b>\n"
+        f"Сохранена ветка: <b>{kept_topic_text}</b>\n\n"
+
+        "<b>ОПЕРАТИВНЫЕ ДАННЫЕ</b>\n\n"
+        f"Зарегистрировано: <b>{total}</b>\n"
+        f"Администраторов: <b>{skipped}</b>\n"
+        f"Уничтожено: <b>{banned}</b>\n"
+        f"Ошибок: <b>{errors}</b>\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "<b>СЕКТОР ОЧИЩЕН</b>\n\n"
+        "Враждебные субъекты устранены.\n"
+        "Авторизованный персонал сохранён.\n"
+        "Форумные ветки обработаны.\n"
+        "Протокол Exterminatus завершён.\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>«Из пепла рождается порядок.\n"
+        "Из порядка — Империум.»</i>\n\n"
+
+        "<b>СЛАВА ИМПЕРИУМУ ЧЕЛОВЕЧЕСТВА</b>"
+    )
+
+    # ============================================================
+    # ОБНОВЛЕНИЕ СТАТУСА
+    # ============================================================
+
+    try:
+        await status_msg.edit_text(text)
+
+    except Exception as e:
+        logger.warning(
+            "Не удалось изменить статус-сообщение: %s",
+            e,
+        )
+
+        try:
+            await message.answer(text)
+        except Exception:
+            logger.exception(
+                "Не удалось отправить финальный отчёт"
+            )
