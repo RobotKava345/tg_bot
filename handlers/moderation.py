@@ -6,6 +6,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest, TelegramAPIError
 
 from utils import is_admin
+from database.permissions import can_moderate_users
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -13,7 +14,7 @@ router = Router()
 
 @router.message(Command("ban"))
 async def cmd_ban(message: types.Message, bot: Bot):
-    if not await is_admin(bot, message.chat.id, message.from_user.id):
+    if not await can_moderate_users(bot, message.chat.id, message.from_user.id):
         return await message.reply("Недостаточно Порчи в твоей крови для этого ритуала.")
 
     if not message.reply_to_message or not message.reply_to_message.from_user:
@@ -46,7 +47,7 @@ async def cmd_ban(message: types.Message, bot: Bot):
 
 @router.message(Command("unban"))
 async def cmd_unban(message: types.Message, command: CommandObject, bot: Bot):
-    if not await is_admin(bot, message.chat.id, message.from_user.id):
+    if not await can_moderate_users(bot, message.chat.id, message.from_user.id):
         return await message.reply("Недостаточно Порчи в твоей крови для этого ритуала.")
 
     user_id = None
@@ -79,7 +80,7 @@ async def cmd_unban(message: types.Message, command: CommandObject, bot: Bot):
 
 @router.message(Command("mute"))
 async def cmd_mute(message: types.Message, command: CommandObject, bot: Bot):
-    if not await is_admin(bot, message.chat.id, message.from_user.id):
+    if not await can_moderate_users(bot, message.chat.id, message.from_user.id):
         return await message.reply("Недостаточно Порчи в твоей крови для этого ритуала.")
 
     if not message.reply_to_message or not message.reply_to_message.from_user:
@@ -119,7 +120,7 @@ async def cmd_mute(message: types.Message, command: CommandObject, bot: Bot):
 
 @router.message(Command("unmute"))
 async def cmd_unmute(message: types.Message, bot: Bot):
-    if not await is_admin(bot, message.chat.id, message.from_user.id):
+    if not await can_moderate_users(bot, message.chat.id, message.from_user.id):
         return await message.reply("Недостаточно Порчи в твоей крови для этого ритуала.")
 
     if not message.reply_to_message or not message.reply_to_message.from_user:

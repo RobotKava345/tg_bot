@@ -9,27 +9,17 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # Создание таблицы
 # ============================================================
-
-async def init_statuses_table():
-    """
-    Создаёт таблицу статусов, если она ещё не существует.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS statuses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                description TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(chat_id, name)
-            )
-            """
-        )
-
-        await db.commit()
+#
+# УДАЛЕНО: init_statuses_table().
+#
+# Таблица statuses теперь создаётся только в database/db.py
+# (init_db()), где у неё актуальная схема — с колонками
+# active и updated_at. Собственная init-функция здесь дублировала
+# создание той же таблицы, но с урезанной схемой (без active
+# и updated_at), и была миной замедленного действия: если бы её
+# вызвали раньше db.init_db(), таблица создалась бы в устаревшем
+# виде.
+# ============================================================
 
 
 # ============================================================
