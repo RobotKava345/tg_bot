@@ -1,25 +1,20 @@
 import logging
-import aiosqlite
 
-from config import DB_NAME
+from database.pool import get_pool
 
 logger = logging.getLogger(__name__)
 
+# Таблица statuses создаётся в database/db.py (init_db()).
+# Отдельной init-функции здесь больше нет (см. историю чата —
+# раньше была своя init_statuses_table() с устаревшей схемой,
+# удалена как дублирующая и потенциально опасная).
 
-# ============================================================
-# Создание таблицы
-# ============================================================
-#
-# УДАЛЕНО: init_statuses_table().
-#
-# Таблица statuses теперь создаётся только в database/db.py
-# (init_db()), где у неё актуальная схема — с колонками
-# active и updated_at. Собственная init-функция здесь дублировала
-# создание той же таблицы, но с урезанной схемой (без active
-# и updated_at), и была миной замедленного действия: если бы её
-# вызвали раньше db.init_db(), таблица создалась бы в устаревшем
-# виде.
-# ============================================================
+
+def _parse_rowcount(status: str) -> int:
+    try:
+        return int(status.split()[-1])
+    except (ValueError, IndexError):
+        return 0
 
 
 # ============================================================
@@ -31,58 +26,27 @@ async def create_status(
     name: str,
     description: str | None = None,
 ) -> int | None:
-    """
-    Создаёт новый статус.
-
-    Возвращает ID созданного статуса.
-    Если такой статус уже существует - None.
-    """
-
     name = name.strip()
-
     if not name:
         return None
 
+    pool = get_pool()
     try:
-        async with aiosqlite.connect(DB_NAME) as db:
-            cursor = await db.execute(
-                """
-                INSERT INTO statuses (
-                    chat_id,
-                    name,
-                    description
-                )
-                VALUES (?, ?, ?)
-                """,
-                (
-                    chat_id,
-                    name,
-                    description,
-                ),
-            )
-
-            await db.commit()
-
-            return cursor.lastrowid
-
-    except aiosqlite.IntegrityError:
-        logger.warning(
-            "Статус '%s' уже существует в чате %s",
-            name,
-            chat_id,
+        return await pool.fetchval(
+            """
+            INSERT INTO statuses (chat_id, name, description)
+            VALUES ($1, $2, $3)
+            RETURNING id
+            """,
+            chat_id, name, description,
         )
-
-        return None
-
     except Exception as e:
-        logger.error(
-            "Ошибка создания статуса '%s' "
-            "в чате %s: %s",
-            name,
-            chat_id,
-            e,
+        # UniqueViolationError входит в это же except, как и раньше
+        # ловился aiosqlite.IntegrityError.
+        logger.warning(
+            "Не удалось создать статус '%s' в чате %s: %s",
+            name, chat_id, e,
         )
-
         return None
 
 
@@ -90,125 +54,59 @@ async def create_status(
 # Получение статуса
 # ============================================================
 
-async def get_status(
-    chat_id: int,
-    status_id: int,
-) -> dict | None:
-    """
-    Получает статус по ID.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-
-        cursor = await db.execute(
-            """
-            SELECT
-                id,
-                chat_id,
-                name,
-                description,
-                created_at
-            FROM statuses
-            WHERE chat_id = ?
-              AND id = ?
-            """,
-            (
-                chat_id,
-                status_id,
-            ),
-        )
-
-        row = await cursor.fetchone()
-
-        if row is None:
-            return None
-
-        return dict(row)
+async def get_status(chat_id: int, status_id: int) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT id, chat_id, name, description, created_at
+        FROM statuses
+        WHERE chat_id = $1 AND id = $2
+        """,
+        chat_id, status_id,
+    )
+    return dict(row) if row else None
 
 
 # ============================================================
 # Получение всех статусов
 # ============================================================
 
-async def get_statuses(
-    chat_id: int,
-) -> list[dict]:
-    """
-    Возвращает все статусы чата.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-
-        cursor = await db.execute(
-            """
-            SELECT
-                id,
-                chat_id,
-                name,
-                description,
-                created_at
-            FROM statuses
-            WHERE chat_id = ?
-            ORDER BY id ASC
-            """,
-            (chat_id,),
-        )
-
-        rows = await cursor.fetchall()
-
-        return [dict(row) for row in rows]
+async def get_statuses(chat_id: int) -> list[dict]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, chat_id, name, description, created_at
+        FROM statuses
+        WHERE chat_id = $1
+        ORDER BY id ASC
+        """,
+        chat_id,
+    )
+    return [dict(row) for row in rows]
 
 
 # ============================================================
 # Поиск статусов
 # ============================================================
 
-async def search_statuses(
-    chat_id: int,
-    query: str,
-) -> list[dict]:
-    """
-    Ищет статусы по названию или описанию.
-    """
-
+async def search_statuses(chat_id: int, query: str) -> list[dict]:
     query = query.strip()
-
     if not query:
         return await get_statuses(chat_id)
 
     pattern = f"%{query}%"
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-
-        cursor = await db.execute(
-            """
-            SELECT
-                id,
-                chat_id,
-                name,
-                description,
-                created_at
-            FROM statuses
-            WHERE chat_id = ?
-              AND (
-                    name LIKE ?
-                    OR description LIKE ?
-              )
-            ORDER BY id ASC
-            """,
-            (
-                chat_id,
-                pattern,
-                pattern,
-            ),
-        )
-
-        rows = await cursor.fetchall()
-
-        return [dict(row) for row in rows]
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, chat_id, name, description, created_at
+        FROM statuses
+        WHERE chat_id = $1
+          AND (name ILIKE $2 OR description ILIKE $2)
+        ORDER BY id ASC
+        """,
+        chat_id, pattern,
+    )
+    return [dict(row) for row in rows]
 
 
 # ============================================================
@@ -221,57 +119,26 @@ async def update_status(
     name: str,
     description: str | None = None,
 ) -> bool:
-    """
-    Изменяет существующий статус.
-    """
-
     name = name.strip()
-
     if not name:
         return False
 
+    pool = get_pool()
     try:
-        async with aiosqlite.connect(DB_NAME) as db:
-            cursor = await db.execute(
-                """
-                UPDATE statuses
-                SET
-                    name = ?,
-                    description = ?
-                WHERE chat_id = ?
-                  AND id = ?
-                """,
-                (
-                    name,
-                    description,
-                    chat_id,
-                    status_id,
-                ),
-            )
-
-            await db.commit()
-
-            return cursor.rowcount > 0
-
-    except aiosqlite.IntegrityError:
-        logger.warning(
-            "Нельзя переименовать статус: "
-            "'%s' уже существует в чате %s",
-            name,
-            chat_id,
+        status = await pool.execute(
+            """
+            UPDATE statuses
+            SET name = $1, description = $2
+            WHERE chat_id = $3 AND id = $4
+            """,
+            name, description, chat_id, status_id,
         )
-
-        return False
-
+        return _parse_rowcount(status) > 0
     except Exception as e:
-        logger.error(
-            "Ошибка изменения статуса %s "
-            "в чате %s: %s",
-            status_id,
-            chat_id,
-            e,
+        logger.warning(
+            "Не удалось изменить статус %s в чате %s: %s",
+            status_id, chat_id, e,
         )
-
         return False
 
 
@@ -279,45 +146,22 @@ async def update_status(
 # Удаление статуса
 # ============================================================
 
-async def delete_status(
-    chat_id: int,
-    status_id: int,
-) -> bool:
-    """
-    Удаляет статус.
-
-    ВАЖНО:
-    Перед удалением нужно проверить,
-    используется ли этот статус в member_profiles.
-    """
-
+async def delete_status(chat_id: int, status_id: int) -> bool:
+    pool = get_pool()
     try:
-        async with aiosqlite.connect(DB_NAME) as db:
-            cursor = await db.execute(
-                """
-                DELETE FROM statuses
-                WHERE chat_id = ?
-                  AND id = ?
-                """,
-                (
-                    chat_id,
-                    status_id,
-                ),
-            )
-
-            await db.commit()
-
-            return cursor.rowcount > 0
-
+        status = await pool.execute(
+            """
+            DELETE FROM statuses
+            WHERE chat_id = $1 AND id = $2
+            """,
+            chat_id, status_id,
+        )
+        return _parse_rowcount(status) > 0
     except Exception as e:
         logger.error(
-            "Ошибка удаления статуса %s "
-            "в чате %s: %s",
-            status_id,
-            chat_id,
-            e,
+            "Ошибка удаления статуса %s в чате %s: %s",
+            status_id, chat_id, e,
         )
-
         return False
 
 
@@ -325,64 +169,30 @@ async def delete_status(
 # Проверка существования
 # ============================================================
 
-async def status_exists(
-    chat_id: int,
-    status_id: int,
-) -> bool:
-    """
-    Проверяет существование статуса.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            SELECT 1
-            FROM statuses
-            WHERE chat_id = ?
-              AND id = ?
-            LIMIT 1
-            """,
-            (
-                chat_id,
-                status_id,
-            ),
-        )
-
-        row = await cursor.fetchone()
-
-        return row is not None
+async def status_exists(chat_id: int, status_id: int) -> bool:
+    pool = get_pool()
+    row = await pool.fetchval(
+        """
+        SELECT 1 FROM statuses
+        WHERE chat_id = $1 AND id = $2
+        LIMIT 1
+        """,
+        chat_id, status_id,
+    )
+    return row is not None
 
 
 # ============================================================
 # Проверка использования статуса
 # ============================================================
 
-async def count_status_usage(
-    chat_id: int,
-    status_id: int,
-) -> int:
-    """
-    Возвращает количество карточек участников,
-    использующих данный статус.
-
-    Предполагается, что member_profiles.status_id
-    хранит ID статуса.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            SELECT COUNT(*)
-            FROM member_profiles
-            WHERE chat_id = ?
-              AND status_id = ?
-            """,
-            (
-                chat_id,
-                status_id,
-            ),
-        )
-
-        row = await cursor.fetchone()
-
-        return row[0] if row else 0
+async def count_status_usage(chat_id: int, status_id: int) -> int:
+    pool = get_pool()
+    row = await pool.fetchval(
+        """
+        SELECT COUNT(*) FROM member_profiles
+        WHERE chat_id = $1 AND status_id = $2
+        """,
+        chat_id, status_id,
+    )
+    return row or 0

@@ -1,11 +1,15 @@
 import logging
 
-import aiosqlite
-
-from config import DB_NAME
-
+from database.pool import get_pool
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_rowcount(status: str) -> int:
+    try:
+        return int(status.split()[-1])
+    except (ValueError, IndexError):
+        return 0
 
 
 # ============================================================
@@ -18,74 +22,31 @@ async def create_role(
     description: str | None = None,
 ) -> int | None:
     """
-    Создаёт новую роль.
-
-    Возвращает:
-        ID созданной роли
-        None - если роль создать не удалось.
-
-    В одном чате две роли с одинаковым названием
-    существовать не могут.
+    Создаёт новую роль. Возвращает ID созданной роли,
+    или None, если создать не удалось (например, роль
+    с таким названием уже есть в этом чате).
     """
-
     name = name.strip()
-
     if not name:
         return None
 
+    pool = get_pool()
     try:
-        async with aiosqlite.connect(DB_NAME) as db:
-
-            cursor = await db.execute(
-                """
-                INSERT INTO roles
-                (
-                    chat_id,
-                    name,
-                    description
-                )
-                VALUES (?, ?, ?)
-                """,
-                (
-                    chat_id,
-                    name,
-                    description,
-                ),
-            )
-
-            await db.commit()
-
-            role_id = cursor.lastrowid
-
-            logger.info(
-                "Создана роль '%s' "
-                "(ID=%s, chat_id=%s)",
-                name,
-                role_id,
-                chat_id,
-            )
-
-            return role_id
-
-    except aiosqlite.IntegrityError:
-        logger.warning(
-            "Роль '%s' уже существует "
-            "в чате %s",
-            name,
-            chat_id,
+        role_id = await pool.fetchval(
+            """
+            INSERT INTO roles (chat_id, name, description)
+            VALUES ($1, $2, $3)
+            RETURNING id
+            """,
+            chat_id, name, description,
         )
-
-        return None
-
+        logger.info("Создана роль '%s' (ID=%s, chat_id=%s)", name, role_id, chat_id)
+        return role_id
     except Exception as e:
-        logger.error(
-            "Ошибка создания роли '%s' "
-            "в чате %s: %s",
-            name,
-            chat_id,
-            e,
+        logger.warning(
+            "Не удалось создать роль '%s' в чате %s: %s",
+            name, chat_id, e,
         )
-
         return None
 
 
@@ -93,238 +54,103 @@ async def create_role(
 # GET ALL
 # ============================================================
 
-async def get_roles(
-    chat_id: int,
-) -> list[dict]:
-    """
-    Возвращает все активные роли чата.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-
-        db.row_factory = aiosqlite.Row
-
-        cursor = await db.execute(
-            """
-            SELECT
-                id,
-                chat_id,
-                name,
-                description,
-                active,
-                created_at,
-                updated_at
-            FROM roles
-            WHERE chat_id = ?
-              AND active = 1
-            ORDER BY id ASC
-            """,
-            (
-                chat_id,
-            ),
-        )
-
-        rows = await cursor.fetchall()
-
-        return [
-            dict(row)
-            for row in rows
-        ]
+async def get_roles(chat_id: int) -> list[dict]:
+    """Возвращает все активные роли чата."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, chat_id, name, description, active, created_at, updated_at
+        FROM roles
+        WHERE chat_id = $1 AND active = TRUE
+        ORDER BY id ASC
+        """,
+        chat_id,
+    )
+    return [dict(row) for row in rows]
 
 
 # ============================================================
 # GET ALL INCLUDING INACTIVE
 # ============================================================
 
-async def get_all_roles(
-    chat_id: int,
-) -> list[dict]:
-    """
-    Возвращает все роли чата,
-    включая отключённые.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-
-        db.row_factory = aiosqlite.Row
-
-        cursor = await db.execute(
-            """
-            SELECT
-                id,
-                chat_id,
-                name,
-                description,
-                active,
-                created_at,
-                updated_at
-            FROM roles
-            WHERE chat_id = ?
-            ORDER BY id ASC
-            """,
-            (
-                chat_id,
-            ),
-        )
-
-        rows = await cursor.fetchall()
-
-        return [
-            dict(row)
-            for row in rows
-        ]
+async def get_all_roles(chat_id: int) -> list[dict]:
+    """Возвращает все роли чата, включая отключённые."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, chat_id, name, description, active, created_at, updated_at
+        FROM roles
+        WHERE chat_id = $1
+        ORDER BY id ASC
+        """,
+        chat_id,
+    )
+    return [dict(row) for row in rows]
 
 
 # ============================================================
 # GET BY ID
 # ============================================================
 
-async def get_role(
-    chat_id: int,
-    role_id: int,
-) -> dict | None:
-    """
-    Возвращает конкретную роль.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-
-        db.row_factory = aiosqlite.Row
-
-        cursor = await db.execute(
-            """
-            SELECT
-                id,
-                chat_id,
-                name,
-                description,
-                active,
-                created_at,
-                updated_at
-            FROM roles
-            WHERE chat_id = ?
-              AND id = ?
-            LIMIT 1
-            """,
-            (
-                chat_id,
-                role_id,
-            ),
-        )
-
-        row = await cursor.fetchone()
-
-        if row is None:
-            return None
-
-        return dict(row)
+async def get_role(chat_id: int, role_id: int) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT id, chat_id, name, description, active, created_at, updated_at
+        FROM roles
+        WHERE chat_id = $1 AND id = $2
+        LIMIT 1
+        """,
+        chat_id, role_id,
+    )
+    return dict(row) if row else None
 
 
 # ============================================================
 # GET BY NAME
 # ============================================================
 
-async def get_role_by_name(
-    chat_id: int,
-    name: str,
-) -> dict | None:
-    """
-    Ищет роль по названию.
-    """
-
+async def get_role_by_name(chat_id: int, name: str) -> dict | None:
     name = name.strip()
-
     if not name:
         return None
 
-    async with aiosqlite.connect(DB_NAME) as db:
-
-        db.row_factory = aiosqlite.Row
-
-        cursor = await db.execute(
-            """
-            SELECT
-                id,
-                chat_id,
-                name,
-                description,
-                active,
-                created_at,
-                updated_at
-            FROM roles
-            WHERE chat_id = ?
-              AND name = ?
-            LIMIT 1
-            """,
-            (
-                chat_id,
-                name,
-            ),
-        )
-
-        row = await cursor.fetchone()
-
-        if row is None:
-            return None
-
-        return dict(row)
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT id, chat_id, name, description, active, created_at, updated_at
+        FROM roles
+        WHERE chat_id = $1 AND name = $2
+        LIMIT 1
+        """,
+        chat_id, name,
+    )
+    return dict(row) if row else None
 
 
 # ============================================================
 # SEARCH
 # ============================================================
 
-async def search_roles(
-    chat_id: int,
-    query: str,
-) -> list[dict]:
-    """
-    Ищет роли по названию или описанию.
-    """
-
+async def search_roles(chat_id: int, query: str) -> list[dict]:
     query = query.strip()
-
     if not query:
         return await get_roles(chat_id)
 
     pattern = f"%{query}%"
-
-    async with aiosqlite.connect(DB_NAME) as db:
-
-        db.row_factory = aiosqlite.Row
-
-        cursor = await db.execute(
-            """
-            SELECT
-                id,
-                chat_id,
-                name,
-                description,
-                active,
-                created_at,
-                updated_at
-            FROM roles
-            WHERE chat_id = ?
-              AND active = 1
-              AND (
-                    name LIKE ?
-                    OR description LIKE ?
-              )
-            ORDER BY id ASC
-            """,
-            (
-                chat_id,
-                pattern,
-                pattern,
-            ),
-        )
-
-        rows = await cursor.fetchall()
-
-        return [
-            dict(row)
-            for row in rows
-        ]
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, chat_id, name, description, active, created_at, updated_at
+        FROM roles
+        WHERE chat_id = $1
+          AND active = TRUE
+          AND (name ILIKE $2 OR description ILIKE $2)
+        ORDER BY id ASC
+        """,
+        chat_id, pattern,
+    )
+    return [dict(row) for row in rows]
 
 
 # ============================================================
@@ -337,68 +163,26 @@ async def update_role(
     name: str,
     description: str | None = None,
 ) -> bool:
-    """
-    Полностью изменяет роль.
-    """
-
     name = name.strip()
-
     if not name:
         return False
 
+    pool = get_pool()
     try:
-        async with aiosqlite.connect(DB_NAME) as db:
-
-            cursor = await db.execute(
-                """
-                UPDATE roles
-                SET
-                    name = ?,
-                    description = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE chat_id = ?
-                  AND id = ?
-                """,
-                (
-                    name,
-                    description,
-                    chat_id,
-                    role_id,
-                ),
-            )
-
-            await db.commit()
-
-            if cursor.rowcount > 0:
-                logger.info(
-                    "Изменена роль ID=%s "
-                    "в чате %s",
-                    role_id,
-                    chat_id,
-                )
-
-            return cursor.rowcount > 0
-
-    except aiosqlite.IntegrityError:
-        logger.warning(
-            "Нельзя переименовать роль: "
-            "'%s' уже существует "
-            "в чате %s",
-            name,
-            chat_id,
+        status = await pool.execute(
+            """
+            UPDATE roles
+            SET name = $1, description = $2, updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = $3 AND id = $4
+            """,
+            name, description, chat_id, role_id,
         )
-
-        return False
-
+        updated = _parse_rowcount(status) > 0
+        if updated:
+            logger.info("Изменена роль ID=%s в чате %s", role_id, chat_id)
+        return updated
     except Exception as e:
-        logger.error(
-            "Ошибка изменения роли %s "
-            "в чате %s: %s",
-            role_id,
-            chat_id,
-            e,
-        )
-
+        logger.error("Ошибка изменения роли %s в чате %s: %s", role_id, chat_id, e)
         return False
 
 
@@ -406,61 +190,24 @@ async def update_role(
 # UPDATE NAME
 # ============================================================
 
-async def update_role_name(
-    chat_id: int,
-    role_id: int,
-    name: str,
-) -> bool:
-    """
-    Изменяет только название роли.
-    """
-
+async def update_role_name(chat_id: int, role_id: int, name: str) -> bool:
     name = name.strip()
-
     if not name:
         return False
 
+    pool = get_pool()
     try:
-        async with aiosqlite.connect(DB_NAME) as db:
-
-            cursor = await db.execute(
-                """
-                UPDATE roles
-                SET
-                    name = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE chat_id = ?
-                  AND id = ?
-                """,
-                (
-                    name,
-                    chat_id,
-                    role_id,
-                ),
-            )
-
-            await db.commit()
-
-            return cursor.rowcount > 0
-
-    except aiosqlite.IntegrityError:
-        logger.warning(
-            "Роль '%s' уже существует "
-            "в чате %s",
-            name,
-            chat_id,
+        status = await pool.execute(
+            """
+            UPDATE roles
+            SET name = $1, updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = $2 AND id = $3
+            """,
+            name, chat_id, role_id,
         )
-
-        return False
-
+        return _parse_rowcount(status) > 0
     except Exception as e:
-        logger.error(
-            "Ошибка изменения названия "
-            "роли %s: %s",
-            role_id,
-            e,
-        )
-
+        logger.error("Ошибка изменения названия роли %s: %s", role_id, e)
         return False
 
 
@@ -473,41 +220,19 @@ async def update_role_description(
     role_id: int,
     description: str | None,
 ) -> bool:
-    """
-    Изменяет только описание роли.
-    """
-
+    pool = get_pool()
     try:
-        async with aiosqlite.connect(DB_NAME) as db:
-
-            cursor = await db.execute(
-                """
-                UPDATE roles
-                SET
-                    description = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE chat_id = ?
-                  AND id = ?
-                """,
-                (
-                    description,
-                    chat_id,
-                    role_id,
-                ),
-            )
-
-            await db.commit()
-
-            return cursor.rowcount > 0
-
-    except Exception as e:
-        logger.error(
-            "Ошибка изменения описания "
-            "роли %s: %s",
-            role_id,
-            e,
+        status = await pool.execute(
+            """
+            UPDATE roles
+            SET description = $1, updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = $2 AND id = $3
+            """,
+            description, chat_id, role_id,
         )
-
+        return _parse_rowcount(status) > 0
+    except Exception as e:
+        logger.error("Ошибка изменения описания роли %s: %s", role_id, e)
         return False
 
 
@@ -515,191 +240,96 @@ async def update_role_description(
 # ENABLE / DISABLE
 # ============================================================
 
-async def set_role_active(
-    chat_id: int,
-    role_id: int,
-    active: bool,
-) -> bool:
+async def set_role_active(chat_id: int, role_id: int, active: bool) -> bool:
     """
-    Включает или отключает роль.
-
-    Это предпочтительнее физического удаления,
+    Включает/отключает роль — предпочтительнее физического удаления,
     если роль уже используется участниками.
     """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-
-        cursor = await db.execute(
-            """
-            UPDATE roles
-            SET
-                active = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE chat_id = ?
-              AND id = ?
-            """,
-            (
-                1 if active else 0,
-                chat_id,
-                role_id,
-            ),
-        )
-
-        await db.commit()
-
-        return cursor.rowcount > 0
+    pool = get_pool()
+    status = await pool.execute(
+        """
+        UPDATE roles
+        SET active = $1, updated_at = CURRENT_TIMESTAMP
+        WHERE chat_id = $2 AND id = $3
+        """,
+        active, chat_id, role_id,
+    )
+    return _parse_rowcount(status) > 0
 
 
 # ============================================================
 # EXISTS
 # ============================================================
 
-async def role_exists(
-    chat_id: int,
-    role_id: int,
-) -> bool:
-    """
-    Проверяет существование роли.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-
-        cursor = await db.execute(
-            """
-            SELECT 1
-            FROM roles
-            WHERE chat_id = ?
-              AND id = ?
-            LIMIT 1
-            """,
-            (
-                chat_id,
-                role_id,
-            ),
-        )
-
-        row = await cursor.fetchone()
-
-        return row is not None
+async def role_exists(chat_id: int, role_id: int) -> bool:
+    pool = get_pool()
+    row = await pool.fetchval(
+        """
+        SELECT 1 FROM roles
+        WHERE chat_id = $1 AND id = $2
+        LIMIT 1
+        """,
+        chat_id, role_id,
+    )
+    return row is not None
 
 
 # ============================================================
 # COUNT
 # ============================================================
 
-async def count_roles(
-    chat_id: int,
-) -> int:
-    """
-    Возвращает количество активных ролей.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-
-        cursor = await db.execute(
-            """
-            SELECT COUNT(*)
-            FROM roles
-            WHERE chat_id = ?
-              AND active = 1
-            """,
-            (
-                chat_id,
-            ),
-        )
-
-        row = await cursor.fetchone()
-
-        return row[0] if row else 0
+async def count_roles(chat_id: int) -> int:
+    pool = get_pool()
+    row = await pool.fetchval(
+        "SELECT COUNT(*) FROM roles WHERE chat_id = $1 AND active = TRUE",
+        chat_id,
+    )
+    return row or 0
 
 
 # ============================================================
 # COUNT USAGE
 # ============================================================
 
-async def count_role_usage(
-    chat_id: int,
-    role_id: int,
-) -> int:
-    """
-    Возвращает количество карточек участников,
-    которым назначена эта роль.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-
-        cursor = await db.execute(
-            """
-            SELECT COUNT(*)
-            FROM member_profiles
-            WHERE chat_id = ?
-              AND role_id = ?
-            """,
-            (
-                chat_id,
-                role_id,
-            ),
-        )
-
-        row = await cursor.fetchone()
-
-        return row[0] if row else 0
+async def count_role_usage(chat_id: int, role_id: int) -> int:
+    pool = get_pool()
+    row = await pool.fetchval(
+        """
+        SELECT COUNT(*) FROM member_profiles
+        WHERE chat_id = $1 AND role_id = $2
+        """,
+        chat_id, role_id,
+    )
+    return row or 0
 
 
 # ============================================================
 # DELETE
 # ============================================================
 
-async def delete_role(
-    chat_id: int,
-    role_id: int,
-) -> bool:
+async def delete_role(chat_id: int, role_id: int) -> bool:
     """
-    Физически удаляет роль.
-
-    Перед удалением желательно проверить
-    count_role_usage().
+    Физически удаляет роль. Перед удалением проверяет,
+    не используется ли она в карточках участников.
     """
-
-    usage = await count_role_usage(
-        chat_id,
-        role_id,
-    )
+    usage = await count_role_usage(chat_id, role_id)
 
     if usage > 0:
         logger.warning(
-            "Нельзя удалить роль ID=%s "
-            "в чате %s: используется "
-            "в %s карточках",
-            role_id,
-            chat_id,
-            usage,
+            "Нельзя удалить роль ID=%s в чате %s: используется в %s карточках",
+            role_id, chat_id, usage,
         )
-
         return False
 
-    async with aiosqlite.connect(DB_NAME) as db:
-
-        cursor = await db.execute(
-            """
-            DELETE FROM roles
-            WHERE chat_id = ?
-              AND id = ?
-            """,
-            (
-                chat_id,
-                role_id,
-            ),
-        )
-
-        await db.commit()
-
-        if cursor.rowcount > 0:
-            logger.info(
-                "Удалена роль ID=%s "
-                "из чата %s",
-                role_id,
-                chat_id,
-            )
-
-        return cursor.rowcount > 0
+    pool = get_pool()
+    status = await pool.execute(
+        """
+        DELETE FROM roles
+        WHERE chat_id = $1 AND id = $2
+        """,
+        chat_id, role_id,
+    )
+    deleted = _parse_rowcount(status) > 0
+    if deleted:
+        logger.info("Удалена роль ID=%s из чата %s", role_id, chat_id)
+    return deleted

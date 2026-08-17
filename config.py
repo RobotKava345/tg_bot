@@ -5,6 +5,10 @@ load_dotenv()
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
+# Публичный HTTPS-адрес мини-аппа (ngrok на этапе разработки,
+# домен хостинга — в проде). Нужен для web_app-кнопки в ЛС.
+MINIAPP_BASE_URL = os.environ.get("MINIAPP_BASE_URL", "")
+
 # Строка подключения к Postgres (Render External Database URL).
 # Формат: postgresql://user:password@host/dbname
 DATABASE_URL = os.environ.get("DATABASE_URL")

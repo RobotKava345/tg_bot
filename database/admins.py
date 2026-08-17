@@ -2,48 +2,40 @@
 Управление админ-типами и правами (RBAC) + автосинхронизация с
 реальными правами администратора в самом Telegram.
 
-Как это работает (полный гибрид, вариант B):
-
-1. У каждого пользователя в чате может быть ЯВНАЯ запись в chat_admins
-   (admin_type: owner / superadmin / admin / moderator / primarch).
-
-2. Параллельно у пользователя есть РЕАЛЬНЫЕ права в Telegram
-   (Owner/Senior Admin/Moderator/Helper из utils.Role — вычисляются
-   из настоящих прав администратора чата).
-
-3. При проверке прав (has_permission) берётся эффективный admin_type —
-   тот из двух источников, у которого выше ранг (ADMIN_TYPE_RANK).
-
-4. Если Telegram-права оказались выше того, что записано в chat_admins —
-   запись в базе автоматически подтягивается вверх (write-through).
-   Обратное (кто-то лишился прав в Telegram) автоматически НЕ снижает
-   явную запись в базе — это осознанное решение вручную снимает
-   владелец/старший админ.
+Как это работает (полный гибрид, вариант B) — см. подробное описание
+в предыдущей версии файла. Здесь та же логика, переписанная под
+Postgres/asyncpg вместо aiosqlite.
 """
 
 import logging
 
-import aiosqlite
-
-from config import DB_NAME
+from database.pool import get_pool
 from utils import Role, get_role
 from database.models import PERMISSIONS
 
 logger = logging.getLogger(__name__)
 
 
+def _parse_rowcount(status: str) -> int:
+    """
+    asyncpg возвращает статус команды строкой вида 'UPDATE 1',
+    'INSERT 0 1', 'DELETE 3'. Достаём число изменённых строк.
+    """
+    try:
+        return int(status.split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
 # ============================================================
 # КАТАЛОГ ADMIN_TYPES И ИХ РАНГ
 # ============================================================
-# Ранг нужен только для сравнения "у кого из двух источников
-# прав больше" — сами права всё равно определяются таблицей
-# admin_type_permissions, а не этим числом.
 
 ADMIN_TYPE_RANK = {
     "owner": 4,
     "superadmin": 3,
     "admin": 2,
-    "primarch": 2,   # тот же уровень, что admin, но другой набор прав
+    "primarch": 2,
     "moderator": 1,
 }
 
@@ -56,8 +48,6 @@ ADMIN_TYPE_DESCRIPTIONS = {
     "primarch": "Управление своим легионом: звания, состав, редактирование.",
 }
 
-
-# Соответствие реальных прав Telegram -> admin_type по умолчанию
 TELEGRAM_ROLE_TO_ADMIN_TYPE = {
     Role.OWNER: "owner",
     Role.SENIOR_ADMIN: "superadmin",
@@ -66,16 +56,8 @@ TELEGRAM_ROLE_TO_ADMIN_TYPE = {
     Role.MEMBER: None,
 }
 
-
-# ============================================================
-# ДЕФОЛТНАЯ МАТРИЦА ПРАВ ПО УМОЛЧАНИЮ
-# ============================================================
-# MANAGE_ADMINS / MANAGE_PERMISSIONS / MANAGE_ROLES сознательно
-# оставлены только у owner — иначе superadmin сможет сам себе
-# выдать любые права, включая право назначать других owner'ов.
-
 DEFAULT_TYPE_PERMISSIONS = {
-    "owner": set(PERMISSIONS),  # всё
+    "owner": set(PERMISSIONS),
 
     "superadmin": {
         "moderate_users",
@@ -116,62 +98,58 @@ DEFAULT_TYPE_PERMISSIONS = {
 # ============================================================
 
 async def seed_admin_types():
-    async with aiosqlite.connect(DB_NAME) as db:
-        for name, description in ADMIN_TYPE_DESCRIPTIONS.items():
-            await db.execute(
-                """
-                INSERT OR IGNORE INTO admin_types (name, description)
-                VALUES (?, ?)
-                """,
-                (name, description),
-            )
-        await db.commit()
+    pool = get_pool()
+    for name, description in ADMIN_TYPE_DESCRIPTIONS.items():
+        await pool.execute(
+            """
+            INSERT INTO admin_types (name, description)
+            VALUES ($1, $2)
+            ON CONFLICT (name) DO NOTHING
+            """,
+            name, description,
+        )
 
 
 async def seed_permissions():
-    async with aiosqlite.connect(DB_NAME) as db:
-        for code in PERMISSIONS:
-            await db.execute(
-                """
-                INSERT OR IGNORE INTO permissions (code, name)
-                VALUES (?, ?)
-                """,
-                (code, code.replace("_", " ").capitalize()),
-            )
-        await db.commit()
+    pool = get_pool()
+    for code in PERMISSIONS:
+        await pool.execute(
+            """
+            INSERT INTO permissions (code, name)
+            VALUES ($1, $2)
+            ON CONFLICT (code) DO NOTHING
+            """,
+            code, code.replace("_", " ").capitalize(),
+        )
 
 
 async def seed_admin_type_permissions():
-    async with aiosqlite.connect(DB_NAME) as db:
-        for type_name, codes in DEFAULT_TYPE_PERMISSIONS.items():
-            type_row = await db.execute(
-                "SELECT id FROM admin_types WHERE name = ?",
-                (type_name,),
+    pool = get_pool()
+
+    for type_name, codes in DEFAULT_TYPE_PERMISSIONS.items():
+        admin_type_id = await pool.fetchval(
+            "SELECT id FROM admin_types WHERE name = $1",
+            type_name,
+        )
+        if admin_type_id is None:
+            continue
+
+        for code in codes:
+            permission_id = await pool.fetchval(
+                "SELECT id FROM permissions WHERE code = $1",
+                code,
             )
-            type_id_row = await type_row.fetchone()
-            if type_id_row is None:
+            if permission_id is None:
                 continue
-            admin_type_id = type_id_row[0]
 
-            for code in codes:
-                perm_row = await db.execute(
-                    "SELECT id FROM permissions WHERE code = ?",
-                    (code,),
-                )
-                perm_id_row = await perm_row.fetchone()
-                if perm_id_row is None:
-                    continue
-                permission_id = perm_id_row[0]
-
-                await db.execute(
-                    """
-                    INSERT OR IGNORE INTO admin_type_permissions
-                    (admin_type_id, permission_id)
-                    VALUES (?, ?)
-                    """,
-                    (admin_type_id, permission_id),
-                )
-        await db.commit()
+            await pool.execute(
+                """
+                INSERT INTO admin_type_permissions (admin_type_id, permission_id)
+                VALUES ($1, $2)
+                ON CONFLICT (admin_type_id, permission_id) DO NOTHING
+                """,
+                admin_type_id, permission_id,
+            )
 
 
 async def seed_rbac_defaults():
@@ -195,28 +173,26 @@ async def assign_admin(
     if admin_type_name not in ADMIN_TYPE_RANK:
         raise ValueError(f"Неизвестный admin_type: {admin_type_name}")
 
-    async with aiosqlite.connect(DB_NAME) as db:
-        type_row = await db.execute(
-            "SELECT id FROM admin_types WHERE name = ?",
-            (admin_type_name,),
-        )
-        row = await type_row.fetchone()
-        if row is None:
-            return False
-        admin_type_id = row[0]
+    pool = get_pool()
 
-        await db.execute(
-            """
-            INSERT INTO chat_admins (chat_id, user_id, admin_type_id, active, assigned_by)
-            VALUES (?, ?, ?, 1, ?)
-            ON CONFLICT(chat_id, user_id) DO UPDATE SET
-                admin_type_id = excluded.admin_type_id,
-                active = 1,
-                assigned_by = excluded.assigned_by
-            """,
-            (chat_id, user_id, admin_type_id, assigned_by),
-        )
-        await db.commit()
+    admin_type_id = await pool.fetchval(
+        "SELECT id FROM admin_types WHERE name = $1",
+        admin_type_name,
+    )
+    if admin_type_id is None:
+        return False
+
+    await pool.execute(
+        """
+        INSERT INTO chat_admins (chat_id, user_id, admin_type_id, active, assigned_by)
+        VALUES ($1, $2, $3, TRUE, $4)
+        ON CONFLICT (chat_id, user_id) DO UPDATE SET
+            admin_type_id = EXCLUDED.admin_type_id,
+            active = TRUE,
+            assigned_by = EXCLUDED.assigned_by
+        """,
+        chat_id, user_id, admin_type_id, assigned_by,
+    )
 
     logger.info(
         "Назначен admin_type '%s' пользователю %s в чате %s",
@@ -226,54 +202,49 @@ async def assign_admin(
 
 
 async def remove_admin(chat_id: int, user_id: int) -> bool:
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            UPDATE chat_admins SET active = 0
-            WHERE chat_id = ? AND user_id = ?
-            """,
-            (chat_id, user_id),
-        )
-        await db.commit()
-        return cursor.rowcount > 0
+    pool = get_pool()
+    status = await pool.execute(
+        """
+        UPDATE chat_admins SET active = FALSE
+        WHERE chat_id = $1 AND user_id = $2
+        """,
+        chat_id, user_id,
+    )
+    return _parse_rowcount(status) > 0
 
 
 async def get_explicit_admin_type(chat_id: int, user_id: int) -> str | None:
     """Явно назначенный admin_type из базы (без учёта Telegram-прав)."""
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            SELECT admin_types.name
-            FROM chat_admins
-            JOIN admin_types ON admin_types.id = chat_admins.admin_type_id
-            WHERE chat_admins.chat_id = ?
-              AND chat_admins.user_id = ?
-              AND chat_admins.active = 1
-              AND admin_types.active = 1
-            """,
-            (chat_id, user_id),
-        )
-        row = await cursor.fetchone()
-        return row[0] if row else None
+    pool = get_pool()
+    return await pool.fetchval(
+        """
+        SELECT admin_types.name
+        FROM chat_admins
+        JOIN admin_types ON admin_types.id = chat_admins.admin_type_id
+        WHERE chat_admins.chat_id = $1
+          AND chat_admins.user_id = $2
+          AND chat_admins.active = TRUE
+          AND admin_types.active = TRUE
+        """,
+        chat_id, user_id,
+    )
 
 
 async def get_chat_admins(chat_id: int) -> list[dict]:
     """Все активные назначенные админы конкретного чата."""
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            """
-            SELECT chat_admins.user_id, admin_types.name AS admin_type
-            FROM chat_admins
-            JOIN admin_types ON admin_types.id = chat_admins.admin_type_id
-            WHERE chat_admins.chat_id = ?
-              AND chat_admins.active = 1
-            ORDER BY admin_types.id
-            """,
-            (chat_id,),
-        )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT chat_admins.user_id, admin_types.name AS admin_type
+        FROM chat_admins
+        JOIN admin_types ON admin_types.id = chat_admins.admin_type_id
+        WHERE chat_admins.chat_id = $1
+          AND chat_admins.active = TRUE
+        ORDER BY admin_types.id
+        """,
+        chat_id,
+    )
+    return [dict(row) for row in rows]
 
 
 # ============================================================
@@ -288,16 +259,15 @@ async def log_audit(
     old_value: str | None = None,
     new_value: str | None = None,
 ):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            """
-            INSERT INTO audit_logs
-            (chat_id, actor_id, action, target_id, old_value, new_value)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (chat_id, actor_id, action, target_id, old_value, new_value),
-        )
-        await db.commit()
+    pool = get_pool()
+    await pool.execute(
+        """
+        INSERT INTO audit_logs
+        (chat_id, actor_id, action, target_id, old_value, new_value)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        """,
+        chat_id, actor_id, action, target_id, old_value, new_value,
+    )
 
 
 # ============================================================
@@ -305,22 +275,21 @@ async def log_audit(
 # ============================================================
 
 async def admin_type_has_permission(admin_type_name: str, permission_code: str) -> bool:
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            SELECT 1
-            FROM admin_type_permissions
-            JOIN admin_types ON admin_types.id = admin_type_permissions.admin_type_id
-            JOIN permissions ON permissions.id = admin_type_permissions.permission_id
-            WHERE admin_types.name = ?
-              AND permissions.code = ?
-              AND admin_types.active = 1
-            LIMIT 1
-            """,
-            (admin_type_name, permission_code),
-        )
-        row = await cursor.fetchone()
-        return row is not None
+    pool = get_pool()
+    row = await pool.fetchval(
+        """
+        SELECT 1
+        FROM admin_type_permissions
+        JOIN admin_types ON admin_types.id = admin_type_permissions.admin_type_id
+        JOIN permissions ON permissions.id = admin_type_permissions.permission_id
+        WHERE admin_types.name = $1
+          AND permissions.code = $2
+          AND admin_types.active = TRUE
+        LIMIT 1
+        """,
+        admin_type_name, permission_code,
+    )
+    return row is not None
 
 
 async def has_permission(bot, chat_id: int, user_id: int, permission: str) -> bool:

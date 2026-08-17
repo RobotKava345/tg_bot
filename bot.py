@@ -58,7 +58,7 @@ async def main():
     logger.info("Админ-бот запущен")
 
     try:
-        await dp.start_polling(bot, allowed_updates=["message", "chat_member"])
+        await dp.start_polling(bot, allowed_updates=["message", "chat_member", "callback_query"])
     finally:
         await telethon_client.disconnect()
         await close_pool()

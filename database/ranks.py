@@ -1,11 +1,15 @@
 import logging
 
-import aiosqlite
-
-from config import DB_NAME
-
+from database.pool import get_pool
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_rowcount(status: str) -> int:
+    try:
+        return int(status.split()[-1])
+    except (ValueError, IndexError):
+        return 0
 
 
 # ============================================================
@@ -18,213 +22,89 @@ async def create_rank(
     points_required: int = 0,
     description: str | None = None,
 ) -> int:
-    """
-    Создаёт новое звание для легиона.
-
-    Возвращает ID созданного звания.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            INSERT INTO ranks
-            (
-                legion_id,
-                name,
-                points_required,
-                description
-            )
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                legion_id,
-                name,
-                points_required,
-                description,
-            ),
-        )
-
-        await db.commit()
-
-        rank_id = cursor.lastrowid
-
-        logger.info(
-            "Создано звание '%s' (ID=%s, legion_id=%s)",
-            name,
-            rank_id,
-            legion_id,
-        )
-
-        return rank_id
+    pool = get_pool()
+    rank_id = await pool.fetchval(
+        """
+        INSERT INTO ranks (legion_id, name, points_required, description)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id
+        """,
+        legion_id, name, points_required, description,
+    )
+    logger.info(
+        "Создано звание '%s' (ID=%s, legion_id=%s)",
+        name, rank_id, legion_id,
+    )
+    return rank_id
 
 
 # ============================================================
 # GET ONE
 # ============================================================
 
-async def get_rank(
-    rank_id: int,
-    legion_id: int,
-):
-    """
-    Возвращает одно звание конкретного легиона.
-
-    Если звание не найдено - None.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            SELECT
-                id,
-                legion_id,
-                name,
-                points_required,
-                description
-            FROM ranks
-            WHERE id = ?
-              AND legion_id = ?
-            """,
-            (
-                rank_id,
-                legion_id,
-            ),
-        )
-
-        row = await cursor.fetchone()
-
-    if row is None:
-        return None
-
-    return {
-        "id": row[0],
-        "legion_id": row[1],
-        "name": row[2],
-        "points_required": row[3],
-        "description": row[4],
-    }
+async def get_rank(rank_id: int, legion_id: int):
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT id, legion_id, name, points_required, description
+        FROM ranks
+        WHERE id = $1 AND legion_id = $2
+        """,
+        rank_id, legion_id,
+    )
+    return dict(row) if row else None
 
 
 # ============================================================
 # GET ALL
 # ============================================================
 
-async def get_ranks(
-    legion_id: int,
-):
-    """
-    Возвращает все звания конкретного легиона.
-
-    Сортировка:
-    1. по необходимому количеству очков;
-    2. затем по ID.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            SELECT
-                id,
-                legion_id,
-                name,
-                points_required,
-                description
-            FROM ranks
-            WHERE legion_id = ?
-            ORDER BY points_required ASC, id ASC
-            """,
-            (legion_id,),
-        )
-
-        rows = await cursor.fetchall()
-
-    return [
-        {
-            "id": row[0],
-            "legion_id": row[1],
-            "name": row[2],
-            "points_required": row[3],
-            "description": row[4],
-        }
-        for row in rows
-    ]
+async def get_ranks(legion_id: int):
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, legion_id, name, points_required, description
+        FROM ranks
+        WHERE legion_id = $1
+        ORDER BY points_required ASC, id ASC
+        """,
+        legion_id,
+    )
+    return [dict(row) for row in rows]
 
 
 # ============================================================
 # GET BY NAME
 # ============================================================
 
-async def get_rank_by_name(
-    legion_id: int,
-    name: str,
-):
-    """
-    Ищет звание по названию внутри конкретного легиона.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            SELECT
-                id,
-                legion_id,
-                name,
-                points_required,
-                description
-            FROM ranks
-            WHERE legion_id = ?
-              AND name = ?
-            LIMIT 1
-            """,
-            (
-                legion_id,
-                name,
-            ),
-        )
-
-        row = await cursor.fetchone()
-
-    if row is None:
-        return None
-
-    return {
-        "id": row[0],
-        "legion_id": row[1],
-        "name": row[2],
-        "points_required": row[3],
-        "description": row[4],
-    }
+async def get_rank_by_name(legion_id: int, name: str):
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT id, legion_id, name, points_required, description
+        FROM ranks
+        WHERE legion_id = $1 AND name = $2
+        LIMIT 1
+        """,
+        legion_id, name,
+    )
+    return dict(row) if row else None
 
 
 # ============================================================
 # EXISTS
 # ============================================================
 
-async def rank_exists(
-    legion_id: int,
-    rank_id: int,
-) -> bool:
-    """
-    Проверяет существование звания внутри легиона.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            SELECT 1
-            FROM ranks
-            WHERE id = ?
-              AND legion_id = ?
-            LIMIT 1
-            """,
-            (
-                rank_id,
-                legion_id,
-            ),
-        )
-
-        row = await cursor.fetchone()
-
+async def rank_exists(legion_id: int, rank_id: int) -> bool:
+    pool = get_pool()
+    row = await pool.fetchval(
+        """
+        SELECT 1 FROM ranks
+        WHERE id = $1 AND legion_id = $2
+        LIMIT 1
+        """,
+        rank_id, legion_id,
+    )
     return row is not None
 
 
@@ -239,115 +119,54 @@ async def update_rank(
     points_required: int = 0,
     description: str | None = None,
 ) -> bool:
-    """
-    Полностью обновляет звание.
-
-    Возвращает:
-        True  - звание обновлено
-        False - звание не найдено
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            UPDATE ranks
-            SET
-                name = ?,
-                points_required = ?,
-                description = ?
-            WHERE id = ?
-              AND legion_id = ?
-            """,
-            (
-                name,
-                points_required,
-                description,
-                rank_id,
-                legion_id,
-            ),
-        )
-
-        await db.commit()
-
-    if cursor.rowcount > 0:
-        logger.info(
-            "Обновлено звание ID=%s (legion_id=%s)",
-            rank_id,
-            legion_id,
-        )
-
-    return cursor.rowcount > 0
+    pool = get_pool()
+    status = await pool.execute(
+        """
+        UPDATE ranks
+        SET name = $1, points_required = $2, description = $3
+        WHERE id = $4 AND legion_id = $5
+        """,
+        name, points_required, description, rank_id, legion_id,
+    )
+    updated = _parse_rowcount(status) > 0
+    if updated:
+        logger.info("Обновлено звание ID=%s (legion_id=%s)", rank_id, legion_id)
+    return updated
 
 
 # ============================================================
 # UPDATE NAME
 # ============================================================
 
-async def update_rank_name(
-    legion_id: int,
-    rank_id: int,
-    name: str,
-) -> bool:
-    """
-    Изменяет только название звания.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            UPDATE ranks
-            SET name = ?
-            WHERE id = ?
-              AND legion_id = ?
-            """,
-            (
-                name,
-                rank_id,
-                legion_id,
-            ),
-        )
-
-        await db.commit()
-
-    return cursor.rowcount > 0
+async def update_rank_name(legion_id: int, rank_id: int, name: str) -> bool:
+    pool = get_pool()
+    status = await pool.execute(
+        """
+        UPDATE ranks SET name = $1
+        WHERE id = $2 AND legion_id = $3
+        """,
+        name, rank_id, legion_id,
+    )
+    return _parse_rowcount(status) > 0
 
 
 # ============================================================
 # UPDATE POINTS
 # ============================================================
 
-async def update_rank_points(
-    legion_id: int,
-    rank_id: int,
-    points_required: int,
-) -> bool:
-    """
-    Изменяет необходимое количество очков.
-    """
-
+async def update_rank_points(legion_id: int, rank_id: int, points_required: int) -> bool:
     if points_required < 0:
-        raise ValueError(
-            "Количество очков не может быть отрицательным"
-        )
+        raise ValueError("Количество очков не может быть отрицательным")
 
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            UPDATE ranks
-            SET points_required = ?
-            WHERE id = ?
-              AND legion_id = ?
-            """,
-            (
-                points_required,
-                rank_id,
-                legion_id,
-            ),
-        )
-
-        await db.commit()
-
-    return cursor.rowcount > 0
+    pool = get_pool()
+    status = await pool.execute(
+        """
+        UPDATE ranks SET points_required = $1
+        WHERE id = $2 AND legion_id = $3
+        """,
+        points_required, rank_id, legion_id,
+    )
+    return _parse_rowcount(status) > 0
 
 
 # ============================================================
@@ -359,88 +178,44 @@ async def update_rank_description(
     rank_id: int,
     description: str | None,
 ) -> bool:
-    """
-    Изменяет описание звания.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            UPDATE ranks
-            SET description = ?
-            WHERE id = ?
-              AND legion_id = ?
-            """,
-            (
-                description,
-                rank_id,
-                legion_id,
-            ),
-        )
-
-        await db.commit()
-
-    return cursor.rowcount > 0
+    pool = get_pool()
+    status = await pool.execute(
+        """
+        UPDATE ranks SET description = $1
+        WHERE id = $2 AND legion_id = $3
+        """,
+        description, rank_id, legion_id,
+    )
+    return _parse_rowcount(status) > 0
 
 
 # ============================================================
 # DELETE
 # ============================================================
 
-async def delete_rank(
-    legion_id: int,
-    rank_id: int,
-) -> bool:
-    """
-    Удаляет звание из конкретного легиона.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            DELETE FROM ranks
-            WHERE id = ?
-              AND legion_id = ?
-            """,
-            (
-                rank_id,
-                legion_id,
-            ),
-        )
-
-        await db.commit()
-
-    if cursor.rowcount > 0:
-        logger.info(
-            "Удалено звание ID=%s из legion_id=%s",
-            rank_id,
-            legion_id,
-        )
-
-    return cursor.rowcount > 0
+async def delete_rank(legion_id: int, rank_id: int) -> bool:
+    pool = get_pool()
+    status = await pool.execute(
+        """
+        DELETE FROM ranks
+        WHERE id = $1 AND legion_id = $2
+        """,
+        rank_id, legion_id,
+    )
+    deleted = _parse_rowcount(status) > 0
+    if deleted:
+        logger.info("Удалено звание ID=%s из legion_id=%s", rank_id, legion_id)
+    return deleted
 
 
 # ============================================================
 # COUNT
 # ============================================================
 
-async def count_ranks(
-    legion_id: int,
-) -> int:
-    """
-    Возвращает количество званий конкретного легиона.
-    """
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """
-            SELECT COUNT(*)
-            FROM ranks
-            WHERE legion_id = ?
-            """,
-            (legion_id,),
-        )
-
-        row = await cursor.fetchone()
-
-    return row[0] if row else 0
+async def count_ranks(legion_id: int) -> int:
+    pool = get_pool()
+    row = await pool.fetchval(
+        "SELECT COUNT(*) FROM ranks WHERE legion_id = $1",
+        legion_id,
+    )
+    return row or 0
