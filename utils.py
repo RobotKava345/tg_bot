@@ -87,3 +87,34 @@ async def get_admin_ids(bot: Bot, chat_id: int) -> set[int]:
     except Exception as e:
         logger.warning(f"Не удалось получить список админов чата {chat_id}: {e}")
         return set()
+
+
+def get_real_reply(message):
+    """
+    Возвращает message.reply_to_message только если это НАСТОЯЩИЙ
+    ответ на чьё-то сообщение — а не автоматическая привязка
+    к теме форума.
+
+    В супергруппах с темами (топиками) Telegram связывает сообщение
+    с темой через тот же механизм reply_to_message, что и обычный
+    ответ пользователя. Без этой проверки любая команда, опирающаяся
+    на "ответь на сообщение того, кого хочешь забанить/замутить/
+    посмотреть карточку" — рискует принять корневое сообщение темы
+    за настоящую цель.
+
+    Признак автопривязки к теме: reply_to_message.message_id
+    совпадает с message_thread_id.
+    """
+    reply = message.reply_to_message
+    if reply is None:
+        return None
+
+    is_topic_auto_link = (
+        message.is_topic_message
+        and reply.message_id == message.message_thread_id
+    )
+
+    if is_topic_auto_link:
+        return None
+
+    return reply

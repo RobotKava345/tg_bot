@@ -139,12 +139,14 @@ async def cmd_ext(
 
     topics_total = 0
     topics_deleted = 0
+    topics_created = 0
     topics_errors = 0
 
     try:
         (
             topics_total,
             topics_deleted,
+            topics_created,
             topics_errors,
         ) = await delete_all_topics_except(
             bot=bot,
@@ -153,9 +155,10 @@ async def cmd_ext(
         )
 
         logger.info(
-            "Форумные ветки обработаны: всего=%s, удалено=%s, ошибок=%s",
+            "Форумные ветки обработаны: всего=%s, удалено=%s, создано=%s, ошибок=%s",
             topics_total,
             topics_deleted,
+            topics_created,
             topics_errors,
         )
 
@@ -277,6 +280,7 @@ async def cmd_ext(
         "<b>ФОРУМНЫЕ ВЕТКИ</b>\n\n"
         f"Найдено: <b>{topics_total}</b>\n"
         f"Удалено: <b>{topics_deleted}</b>\n"
+        f"Создано веток «АВЕ ИМП»: <b>{topics_created}</b>\n"
         f"Ошибок: <b>{topics_errors}</b>\n"
         f"Сохранена ветка: <b>{kept_topic_text}</b>\n\n"
 
@@ -290,7 +294,6 @@ async def cmd_ext(
 
         "<b>СЕКТОР ОЧИЩЕН</b>\n\n"
         "Враждебные субъекты устранены.\n"
-        "Авторизованный персонал сохранён.\n"
         "Форумные ветки обработаны.\n"
         "Протокол Exterminatus завершён.\n\n"
 
@@ -305,18 +308,72 @@ async def cmd_ext(
     # ОБНОВЛЕНИЕ СТАТУСА
     # ============================================================
 
-    try:
-        await status_msg.edit_text(text)
+    async def _send_final_report():
+        """
+        Пытается отправить финальный отчёт с учётом FloodWait.
+        Сначала пробует отредактировать статус-сообщение,
+        при неудаче — отправляет новое.
+        """
 
-    except Exception as e:
-        logger.warning(
-            "Не удалось изменить статус-сообщение: %s",
-            e,
+        attempts = 0
+        max_attempts = 5
+
+        while attempts <= max_attempts:
+            try:
+                await status_msg.edit_text(text)
+                return
+
+            except TelegramRetryAfter as e:
+                attempts += 1
+
+                logger.warning(
+                    "FloodWait при edit_text: ожидание %s сек "
+                    "(%s/%s)",
+                    e.retry_after,
+                    attempts,
+                    max_attempts,
+                )
+
+                await asyncio.sleep(e.retry_after + 1)
+
+            except Exception as e:
+                logger.warning(
+                    "Не удалось изменить статус-сообщение: %s",
+                    e,
+                )
+                break
+
+        # Если редактирование не удалось — пробуем отправить
+        # новое сообщение, тоже с учётом FloodWait.
+        attempts = 0
+
+        while attempts <= max_attempts:
+            try:
+                await message.answer(text)
+                return
+
+            except TelegramRetryAfter as e:
+                attempts += 1
+
+                logger.warning(
+                    "FloodWait при answer: ожидание %s сек "
+                    "(%s/%s)",
+                    e.retry_after,
+                    attempts,
+                    max_attempts,
+                )
+
+                await asyncio.sleep(e.retry_after + 1)
+
+            except Exception:
+                logger.exception(
+                    "Не удалось отправить финальный отчёт"
+                )
+                return
+
+        logger.error(
+            "Не удалось отправить финальный отчёт "
+            "после нескольких попыток FloodWait"
         )
 
-        try:
-            await message.answer(text)
-        except Exception:
-            logger.exception(
-                "Не удалось отправить финальный отчёт"
-            )
+    await _send_final_report()

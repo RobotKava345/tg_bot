@@ -313,7 +313,17 @@ async def has_permission(bot, chat_id: int, user_id: int, permission: str) -> bo
 
     effective_type = explicit_type_name or telegram_type_name
 
-    if not effective_type:
-        return False
+    result = False
+    if effective_type:
+        result = await admin_type_has_permission(effective_type, permission)
 
-    return await admin_type_has_permission(effective_type, permission)
+    logger.info(
+        "DEBUG has_permission: user_id=%s, permission=%s, "
+        "telegram_role=%s, telegram_type=%s, explicit_type=%s, "
+        "effective_type=%s, result=%s",
+        user_id, permission,
+        telegram_role, telegram_type_name, explicit_type_name,
+        effective_type, result,
+    )
+
+    return result

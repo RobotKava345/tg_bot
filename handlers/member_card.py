@@ -1,10 +1,12 @@
+import logging
+
 from aiogram import Router, types, Bot, F
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from utils import NO_RIGHTS_TEXT
+from utils import NO_RIGHTS_TEXT, get_real_reply
 from database.members import (
     ensure_member_profile,
     get_member_profile,
@@ -28,6 +30,7 @@ from database.permissions import (
 )
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 class ProfileStates(StatesGroup):
@@ -105,10 +108,19 @@ def build_profile_keyboard(target_id: int) -> InlineKeyboardMarkup:
 
 
 def _resolve_target(message: types.Message) -> tuple[types.User, bool]:
-    """Возвращает (target_user, viewing_self)."""
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target = message.reply_to_message.from_user
+    """
+    Возвращает (target_user, viewing_self).
+
+    Использует get_real_reply() из utils.py, чтобы не путать настоящий
+    reply с автопривязкой к теме форума (см. utils.get_real_reply
+    для подробного объяснения).
+    """
+    reply = get_real_reply(message)
+
+    if reply and reply.from_user:
+        target = reply.from_user
         return target, target.id == message.from_user.id
+
     return message.from_user, True
 
 
@@ -119,6 +131,18 @@ def _resolve_target(message: types.Message) -> tuple[types.User, bool]:
 @router.message(Command("profile"))
 async def cmd_profile(message: types.Message, bot: Bot):
     target, viewing_self = _resolve_target(message)
+
+    logger.info(
+        "DEBUG /profile: viewing_self=%s, target_id=%s, "
+        "reply_to_message=%s, is_topic_message=%s, message_thread_id=%s, "
+        "reply_message_id=%s",
+        viewing_self,
+        target.id,
+        message.reply_to_message is not None,
+        message.is_topic_message,
+        message.message_thread_id,
+        message.reply_to_message.message_id if message.reply_to_message else None,
+    )
 
     if not viewing_self:
         if not await can_view_profile(bot, message.chat.id, message.from_user.id):
@@ -147,9 +171,15 @@ async def cb_profile_card(callback: types.CallbackQuery, bot: Bot, state: FSMCon
 
     # ------------------------------------------------------
     # Изменить имя
+    #
+    # Своё имя можно менять всегда, без проверки прав — это базовое
+    # право любого участника (см. изначальное ТЗ на мини-апп).
+    # Право edit_name требуется только для изменения ЧУЖОГО имени.
     # ------------------------------------------------------
     if action == "name":
-        if not await can_edit_name(bot, chat_id, clicker_id):
+        viewing_self = target_id == clicker_id
+
+        if not viewing_self and not await can_edit_name(bot, chat_id, clicker_id):
             return await callback.answer(NO_RIGHTS_TEXT, show_alert=True)
 
         await state.update_data(target_id=target_id, chat_id=chat_id)
@@ -228,10 +258,10 @@ async def process_new_name(message: types.Message, state: FSMContext, bot: Bot):
 
 @router.message(Command("setname"))
 async def cmd_setname(message: types.Message, command: CommandObject, bot: Bot):
-    if not await can_edit_name(bot, message.chat.id, message.from_user.id):
-        return await message.reply(NO_RIGHTS_TEXT)
+    target, viewing_self = _resolve_target(message)
 
-    target, _ = _resolve_target(message)
+    if not viewing_self and not await can_edit_name(bot, message.chat.id, message.from_user.id):
+        return await message.reply(NO_RIGHTS_TEXT)
 
     if not command.args:
         return await message.reply(

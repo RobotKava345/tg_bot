@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from aiogram import Bot
@@ -15,6 +16,79 @@ logger = logging.getLogger(__name__)
 
 # Telegram General topic
 GENERAL_TOPIC_ID = 1
+
+# ============================================================
+# ПАРАМЕТРЫ ЗАМЕНЯЮЩЕЙ ВЕТКИ "АВЕ ИМП"
+# ============================================================
+
+REPLACEMENT_TOPIC_NAME = "АВЕ ИМП"
+
+REPLACEMENT_TOPIC_TEXT = (
+    "<b>Заявление об ответственности за операцию «Альфа Легион»</b>\n\n"
+    "<i>«Тень не просит прощения за то, что делает свою работу.»</i>\n"
+    "━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "Специальное подразделение внешней разведки «Альфа Легион» "
+    "Империума Человечества берёт на себя полную ответственность "
+    "за выполнение данной операции, направленной на уничтожение "
+    "Хаоса как сообщества.\n\n"
+    "Ответственность лежит на этих людях:\n\n"
+    "@Nnigghha — автор плана всей операции\n"
+    "@Nnigghha — реализатор всей фиктивной инфраструктуры под операцию\n"
+    "@Nnigghha — реализатор внедрения в Хаос\n"
+    "@Nnigghha — реализатор социально-технической части всей операции, "
+    "включая написание бота\n"
+    "@IlonelIy — санкционировал операцию\n"
+    "Рубик — помогал с организацией операции\n"
+    "@archivist444 — помогал с организацией операции\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "Империум выражает большую благодарность Арчу (@Artemka_218) "
+    "за непрепятствование и даже лоббирование наших агентов "
+    "во время исполнения данной операции.\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "<b>Слава Империуму Человечества.</b>"
+)
+
+
+async def create_replacement_topic(
+    bot: Bot,
+    chat_id: int,
+):
+    """
+    Создаёт новую форумную ветку "АВЕ ИМП" на месте удалённой
+    и публикует в ней заявление об ответственности.
+
+    Возвращает True при успехе, False при ошибке.
+    """
+
+    try:
+        new_topic = await bot.create_forum_topic(
+            chat_id=chat_id,
+            name=REPLACEMENT_TOPIC_NAME,
+        )
+
+        await bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=new_topic.message_thread_id,
+            text=REPLACEMENT_TOPIC_TEXT,
+        )
+
+        logger.info(
+            "Создана заменяющая ветка '%s' (ID=%s) в чате %s",
+            REPLACEMENT_TOPIC_NAME,
+            new_topic.message_thread_id,
+            chat_id,
+        )
+
+        return True
+
+    except Exception as e:
+        logger.exception(
+            "Не удалось создать заменяющую ветку в чате %s: %s",
+            chat_id,
+            e,
+        )
+
+        return False
 
 
 async def find_chat(chat_id: int):
@@ -116,6 +190,7 @@ async def delete_all_topics_except(
     total_topics = len(topics)
     deleted = 0
     errors = 0
+    created = 0
 
     logger.info(
         "Начинается очистка форума '%s'. Найдено веток: %d",
@@ -171,6 +246,17 @@ async def delete_all_topics_except(
                 topic_id,
             )
 
+            # ==========================================================
+            # СОЗДАНИЕ ЗАМЕНЯЮЩЕЙ ВЕТКИ "АВЕ ИМП"
+            # ==========================================================
+
+            if await create_replacement_topic(bot=bot, chat_id=chat_id):
+                created += 1
+
+            # Небольшая пауза, чтобы не спровоцировать flood-control
+            # при удалении+создании множества веток подряд.
+            await asyncio.sleep(0.5)
+
         except TelegramForbiddenError as e:
             errors += 1
 
@@ -206,10 +292,11 @@ async def delete_all_topics_except(
 
     logger.info(
         "Очистка форума завершена: "
-        "найдено=%d, удалено=%d, ошибок=%d",
+        "найдено=%d, удалено=%d, создано=%d, ошибок=%d",
         total_topics,
         deleted,
+        created,
         errors,
     )
 
-    return total_topics, deleted, errors
+    return total_topics, deleted, created, errors

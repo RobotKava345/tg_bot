@@ -5,7 +5,7 @@ from aiogram import Router, types, Bot
 from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest, TelegramAPIError
 
-from utils import is_admin
+from utils import is_admin, get_real_reply
 from database.permissions import can_moderate_users
 
 logger = logging.getLogger(__name__)
@@ -17,10 +17,11 @@ async def cmd_ban(message: types.Message, bot: Bot):
     if not await can_moderate_users(bot, message.chat.id, message.from_user.id):
         return await message.reply("Недостаточно Порчи в твоей крови для этого ритуала.")
 
-    if not message.reply_to_message or not message.reply_to_message.from_user:
+    reply = get_real_reply(message)
+    if not reply or not reply.from_user:
         return await message.reply("Укажи жертву для ритуала — ответь на её сообщение.")
 
-    target = message.reply_to_message.from_user
+    target = reply.from_user
 
     if target.is_bot:
         return await message.reply("Машинный дух не подвластен Хаосу. Ботов этой командой не изгнать.")
@@ -51,9 +52,10 @@ async def cmd_unban(message: types.Message, command: CommandObject, bot: Bot):
         return await message.reply("Недостаточно Порчи в твоей крови для этого ритуала.")
 
     user_id = None
+    reply = get_real_reply(message)
 
-    if message.reply_to_message and message.reply_to_message.from_user:
-        user_id = message.reply_to_message.from_user.id
+    if reply and reply.from_user:
+        user_id = reply.from_user.id
     elif command.args and command.args.strip().isdigit():
         user_id = int(command.args.strip())
     else:
@@ -83,10 +85,11 @@ async def cmd_mute(message: types.Message, command: CommandObject, bot: Bot):
     if not await can_moderate_users(bot, message.chat.id, message.from_user.id):
         return await message.reply("Недостаточно Порчи в твоей крови для этого ритуала.")
 
-    if not message.reply_to_message or not message.reply_to_message.from_user:
+    reply = get_real_reply(message)
+    if not reply or not reply.from_user:
         return await message.reply("Укажи еретика — ответь на его сообщение.")
 
-    target = message.reply_to_message.from_user
+    target = reply.from_user
 
     if await is_admin(bot, message.chat.id, target.id):
         return await message.reply("Голос Повелителя культа заглушить нельзя.")
@@ -123,10 +126,11 @@ async def cmd_unmute(message: types.Message, bot: Bot):
     if not await can_moderate_users(bot, message.chat.id, message.from_user.id):
         return await message.reply("Недостаточно Порчи в твоей крови для этого ритуала.")
 
-    if not message.reply_to_message or not message.reply_to_message.from_user:
+    reply = get_real_reply(message)
+    if not reply or not reply.from_user:
         return await message.reply("Укажи еретика — ответь на его сообщение.")
 
-    target = message.reply_to_message.from_user
+    target = reply.from_user
 
     try:
         await bot.restrict_chat_member(
