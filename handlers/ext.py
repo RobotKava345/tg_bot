@@ -9,7 +9,7 @@ from aiogram.exceptions import (
     TelegramBadRequest,
 )
 
-from utils import is_admin, get_admin_ids
+from utils import get_admin_ids
 from database.db import get_seen_users
 from forum_topics import delete_all_topics_except
 
@@ -18,32 +18,12 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-@router.message(Command("exterminatus"))
+@router.message(Command("fire_exterminatus"))
 async def cmd_ext(
     message: types.Message,
     command: CommandObject,
     bot: Bot,
 ):
-    # ============================================================
-    # ПРОВЕРКА АДМИНИСТРАТОРА
-    # ============================================================
-
-    if not message.from_user:
-        return
-
-    if not await is_admin(
-        bot,
-        message.chat.id,
-        message.from_user.id,
-    ):
-        return await message.reply(
-            "<b>ORDO INQUISITIONIS</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "<b>ДОСТУП ЗАПРЕЩЁН</b>\n\n"
-            "Данная директива доступна только\n"
-            "авторизованному персоналу."
-        )
-
     # ============================================================
     # ПРОВЕРКА ПОДТВЕРЖДЕНИЯ
     # ============================================================
@@ -68,7 +48,7 @@ async def cmd_ext(
             "<b>ДИРЕКТИВА</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "Для активации протокола введите:\n"
-            "<code>/exterminatus confirm</code>\n\n"
+            "<code>/fire_exterminatus confirm</code>\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "<i>«Ересь требует очищения.\n"
             "Очищение требует огня.»</i>"

@@ -71,6 +71,7 @@ DEFAULT_TYPE_PERMISSIONS = {
         "manage_ranks",
         "manage_legions",
         "manage_statuses",
+        "manage_admins",
         "view_audit_log",
     },
 
