@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from enum import IntEnum
 
@@ -87,6 +88,60 @@ async def get_admin_ids(bot: Bot, chat_id: int) -> set[int]:
     except Exception as e:
         logger.warning(f"Не удалось получить список админов чата {chat_id}: {e}")
         return set()
+
+
+class AdaptiveThrottle:
+    """
+    Адаптивная пауза между массовыми административными действиями
+    (баны, удаление/создание веток и т.п.).
+
+    Идея: не держать фиксированную "на глаз" паузу всё время, а
+    начинать с небольшой (base_delay) и увеличивать её только
+    когда Telegram реально пожаловался (FloodWait), постепенно
+    возвращая к базовой после recovery_after подряд успешных
+    операций без жалоб.
+    """
+
+    def __init__(
+        self,
+        base_delay: float = 0.8,
+        max_delay: float = 6.0,
+        increase_factor: float = 1.6,
+        recovery_after: int = 10,
+    ):
+        self.base_delay = base_delay
+        self.max_delay = max_delay
+        self.increase_factor = increase_factor
+        self.recovery_after = recovery_after
+
+        self.current_delay = base_delay
+        self._success_streak = 0
+
+    async def wait(self):
+        await asyncio.sleep(self.current_delay)
+
+    def on_success(self):
+        """Вызывать после каждой успешной операции."""
+        self._success_streak += 1
+
+        if (
+            self._success_streak >= self.recovery_after
+            and self.current_delay > self.base_delay
+        ):
+            self.current_delay = max(
+                self.base_delay,
+                self.current_delay / self.increase_factor,
+            )
+            self._success_streak = 0
+
+    def on_flood_wait(self, retry_after: float):
+        """Вызывать при получении TelegramRetryAfter."""
+        self._success_streak = 0
+
+        self.current_delay = min(
+            self.max_delay,
+            max(self.current_delay * self.increase_factor, retry_after * 0.1),
+        )
 
 
 def get_real_reply(message):

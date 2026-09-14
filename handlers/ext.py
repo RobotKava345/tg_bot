@@ -9,9 +9,9 @@ from aiogram.exceptions import (
     TelegramBadRequest,
 )
 
-from utils import get_admin_ids
+from utils import get_admin_ids, AdaptiveThrottle
 from database.db import get_seen_users
-from forum_topics import delete_all_topics_except
+from forum_topics import delete_all_topics_except, create_replacement_topics
 
 
 logger = logging.getLogger(__name__)
@@ -113,42 +113,11 @@ async def cmd_ext(
     except Exception:
         logger.exception("Не удалось получить ID бота")
 
-    # ============================================================
-    # УДАЛЕНИЕ ФОРУМНЫХ ВЕТОК
-    # ============================================================
-
-    topics_total = 0
-    topics_deleted = 0
-    topics_created = 0
-    topics_errors = 0
-
-    try:
-        (
-            topics_total,
-            topics_deleted,
-            topics_created,
-            topics_errors,
-        ) = await delete_all_topics_except(
-            bot=bot,
-            chat_id=chat_id,
-            keep_topic_id=keep_topic_id,
-        )
-
-        logger.info(
-            "Форумные ветки обработаны: всего=%s, удалено=%s, создано=%s, ошибок=%s",
-            topics_total,
-            topics_deleted,
-            topics_created,
-            topics_errors,
-        )
-
-    except Exception as e:
-        logger.exception(
-            "Ошибка синхронизации/удаления форумных веток: %s",
-            e,
-        )
-
-        topics_errors = 1
+    # Тот, кто запустил команду, всегда исключается — даже если
+    # Telegram формально не считает его админом чата (например,
+    # права выданы только через внутреннюю RBAC/БД, а не через
+    # реальный статус администратора).
+    admin_ids.add(message.from_user.id)
 
     # ============================================================
     # ПОЛУЧЕНИЕ ЗАРЕГИСТРИРОВАННЫХ ПОЛЬЗОВАТЕЛЕЙ
@@ -162,10 +131,35 @@ async def cmd_ext(
     errors = 0
 
     # ============================================================
-    # БАН ПОЛЬЗОВАТЕЛЕЙ
+    # ФАЗА 1: БАН ПОЛЬЗОВАТЕЛЕЙ
     # ============================================================
 
-    for user_id in users:
+    throttle = AdaptiveThrottle(base_delay=1.0, max_delay=8.0)
+    STATUS_UPDATE_EVERY = 25
+
+    async def _update_progress(processed: int):
+        """
+        Промежуточный апдейт статус-сообщения — best-effort,
+        без ретраев: если не получилось, просто пропускаем,
+        это не критично для самой операции.
+        """
+        try:
+            await status_msg.edit_text(
+                "<b>ORDO INQUISITIONIS</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "<b>EXTERMINATUS</b>\n\n"
+                "Статус: <b>ВЫПОЛНЕНИЕ</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Обработано: <b>{processed}/{total}</b>\n"
+                f"Уничтожено: <b>{banned}</b>\n"
+                f"Пропущено (админы): <b>{skipped}</b>\n"
+                f"Ошибок: <b>{errors}</b>\n\n"
+                "<i>«Огонь не гаснет, пока не сгорит вся ересь.»</i>"
+            )
+        except Exception:
+            logger.debug("Не удалось обновить промежуточный статус", exc_info=True)
+
+    for i, user_id in enumerate(users, start=1):
 
         # Администраторов и самого бота не трогаем.
         if user_id in admin_ids:
@@ -201,6 +195,7 @@ async def cmd_ext(
                     user_id,
                 )
 
+                throttle.on_flood_wait(wait)
                 await asyncio.sleep(wait)
                 attempts += 1
 
@@ -233,9 +228,86 @@ async def cmd_ext(
         if not success and attempts >= 2:
             errors += 1
 
-        # Небольшая задержка между операциями.
         if success:
-            await asyncio.sleep(0.25)
+            throttle.on_success()
+
+        # Адаптивная пауза между операциями: базово небольшая,
+        # растёт только при реальном FloodWait и потом плавно
+        # возвращается к базовой.
+        if success:
+            await throttle.wait()
+
+        if i % STATUS_UPDATE_EVERY == 0:
+            await _update_progress(i)
+
+    # Пауза между фазами (баны -> удаление веток), чтобы это не
+    # выглядело одной непрерывной серией разрушительных действий.
+    await asyncio.sleep(3)
+
+    # ============================================================
+    # ФАЗА 2: УДАЛЕНИЕ ФОРУМНЫХ ВЕТОК
+    # ============================================================
+
+    topics_total = 0
+    topics_deleted = 0
+    topics_created = 0
+    topics_errors = 0
+
+    try:
+        (
+            topics_total,
+            topics_deleted,
+            topics_errors,
+        ) = await delete_all_topics_except(
+            bot=bot,
+            chat_id=chat_id,
+            keep_topic_id=keep_topic_id,
+        )
+
+        logger.info(
+            "Ветки удалены: всего=%s, удалено=%s, ошибок=%s",
+            topics_total,
+            topics_deleted,
+            topics_errors,
+        )
+
+    except Exception as e:
+        logger.exception(
+            "Ошибка удаления форумных веток: %s",
+            e,
+        )
+
+        topics_errors += 1
+
+    # Пауза между фазами (удаление -> создание заменяющих веток).
+    await asyncio.sleep(3)
+
+    # ============================================================
+    # ФАЗА 3: СОЗДАНИЕ ЗАМЕНЯЮЩИХ ВЕТОК
+    # ============================================================
+
+    if topics_deleted > 0:
+        try:
+            topics_created, create_errors = await create_replacement_topics(
+                bot=bot,
+                chat_id=chat_id,
+                count=topics_deleted,
+            )
+
+            topics_errors += create_errors
+
+            logger.info(
+                "Заменяющие ветки созданы: создано=%s",
+                topics_created,
+            )
+
+        except Exception as e:
+            logger.exception(
+                "Ошибка создания заменяющих веток: %s",
+                e,
+            )
+
+            topics_errors += 1
 
     # ============================================================
     # ФИНАЛЬНЫЙ ОТЧЁТ

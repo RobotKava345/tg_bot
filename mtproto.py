@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 from telethon import TelegramClient
 
-from database.db import add_user
+from database.db import add_user, get_seen_users
 
 
 load_dotenv()
@@ -24,6 +24,7 @@ client = TelegramClient(
 SYNC_CHATS = {
     -1002427719174: "Хаоситы",
     -1003993853383: "ТЕСТ",
+    -1002721339173: "Новый чат",
 }
 
 
@@ -33,6 +34,10 @@ async def sync_chat_members(chat_id: int) -> int:
     с таблицей seen_users.
 
     Возвращает количество обработанных пользователей.
+
+    После синхронизации отдельно проверяет через БД,
+    какие из полученных user_id действительно присутствуют
+    в seen_users, и выводит результат в консоль/лог.
     """
 
     chat = await client.get_entity(chat_id)
@@ -46,17 +51,66 @@ async def sync_chat_members(chat_id: int) -> int:
     )
 
     count = 0
+    synced_user_ids = []
 
     async for user in client.iter_participants(chat):
         if user.bot:
             continue
 
+        user_id = user.id
+        synced_user_ids.append(user_id)
+
         await add_user(
             chat_id=chat_id,
-            user_id=user.id,
+            user_id=user_id,
         )
 
         count += 1
+
+    # ============================================================
+    # ОТДЕЛЬНАЯ ПРОВЕРКА БАЗЫ ДАННЫХ
+    # ============================================================
+
+    logger.info(
+        "Проверка наличия синхронизированных пользователей в БД..."
+    )
+
+    db_user_ids = set(await get_seen_users(chat_id))
+    synced_user_ids_set = set(synced_user_ids)
+
+    found_user_ids = synced_user_ids_set & db_user_ids
+    missing_user_ids = synced_user_ids_set - db_user_ids
+
+    logger.info(
+        "ПРОВЕРКА БД для '%s' (%s):",
+        title,
+        chat_id,
+    )
+
+    logger.info(
+        "  Получено через Telethon: %d",
+        len(synced_user_ids_set),
+    )
+
+    logger.info(
+        "  Найдено в БД: %d",
+        len(found_user_ids),
+    )
+
+    logger.info(
+        "  НЕ найдено в БД: %d",
+        len(missing_user_ids),
+    )
+
+    if missing_user_ids:
+        logger.warning(
+            "User ID отсутствуют в БД: %s",
+            sorted(missing_user_ids),
+        )
+    else:
+        logger.info(
+            "✅ Все синхронизированные пользователи найдены в БД."
+        )
 
     logger.info(
         "Синхронизация '%s' завершена. Обработано: %d",

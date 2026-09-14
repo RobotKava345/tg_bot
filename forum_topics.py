@@ -5,11 +5,13 @@ from aiogram import Bot
 from aiogram.exceptions import (
     TelegramBadRequest,
     TelegramForbiddenError,
+    TelegramRetryAfter,
 )
 
 from telethon import functions, types
 
 from mtproto import client
+from utils import AdaptiveThrottle
 
 
 logger = logging.getLogger(__name__)
@@ -23,28 +25,27 @@ GENERAL_TOPIC_ID = 1
 
 REPLACEMENT_TOPIC_NAME = "АВЕ ИМП"
 
+# Верхняя граница числа заменяющих веток — независимо от того,
+# сколько реально было удалено. Заявление одно по смыслу, плодить
+# его копию на каждую удалённую ветку незачем, а вот лишние
+# админ-действия (create+send на каждую) заметно увеличивают риск
+# флуда и время операции.
+MAX_REPLACEMENT_TOPICS = 10
+
 REPLACEMENT_TOPIC_TEXT = (
-    "<b>Заявление об ответственности за операцию «Альфа Легион»</b>\n\n"
-    "<i>«Тень не просит прощения за то, что делает свою работу.»</i>\n"
+    "<b>АВЕ ИМПЕРАТОР</b>\n\n"
+    "<i>«Там, где была ересь — воцарился порядок.»</i>\n"
     "━━━━━━━━━━━━━━━━━━━━━\n\n"
-    "Специальное подразделение внешней разведки «Альфа Легион» "
-    "Империума Человечества берёт на себя полную ответственность "
-    "за выполнение данной операции, направленной на уничтожение "
-    "Хаоса как сообщества.\n\n"
-    "Ответственность лежит на этих людях:\n\n"
-    "@Nnigghha — автор плана всей операции\n"
-    "@Nnigghha — реализатор всей фиктивной инфраструктуры под операцию\n"
-    "@Nnigghha — реализатор внедрения в Хаос\n"
-    "@Nnigghha — реализатор социально-технической части всей операции, "
-    "включая написание бота\n"
-    "@IlonelIy — санкционировал операцию\n"
-    "Рубик — помогал с организацией операции\n"
-    "@archivist444 — помогал с организацией операции\n\n"
+    "Сектор очищен. Порча Хаоса выжжена до основания "
+    "силой и волей Инквизиции.\n\n"
+    "Ни один культ, ни одна ересь, ни один изменник "
+    "не укроются от справедливости Империума — "
+    "рано или поздно возмездие настигнет всех.\n\n"
+    "Из пепла старого порядка возводится новый — "
+    "чистый, дисциплинированный, верный только "
+    "одному знамени.\n\n"
     "━━━━━━━━━━━━━━━━━━━━━\n\n"
-    "Империум выражает большую благодарность Арчу (@Artemka_218) "
-    "за непрепятствование и даже лоббирование наших агентов "
-    "во время исполнения данной операции.\n\n"
-    "━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "<b>Император защищает.</b>\n"
     "<b>Слава Империуму Человечества.</b>"
 )
 
@@ -57,7 +58,9 @@ async def create_replacement_topic(
     Создаёт новую форумную ветку "АВЕ ИМП" на месте удалённой
     и публикует в ней заявление об ответственности.
 
-    Возвращает True при успехе, False при ошибке.
+    Возвращает True при успехе, False при неустранимой ошибке.
+    TelegramRetryAfter пробрасывается наверх — вызывающий код сам
+    решает, сколько ждать, и обновляет троттлинг.
     """
 
     try:
@@ -80,6 +83,9 @@ async def create_replacement_topic(
         )
 
         return True
+
+    except TelegramRetryAfter:
+        raise
 
     except Exception as e:
         logger.exception(
@@ -171,7 +177,9 @@ async def delete_all_topics_except(
     keep_topic_id: int | None = None,
 ):
     """
-    Удаляет все форумные ветки, кроме указанной.
+    Удаляет все форумные ветки, кроме указанной. Только удаление —
+    создание заменяющих веток сюда не входит (см. create_replacement_topics),
+    чтобы фазы не смешивались в одну серию разрушительных действий.
 
     General (ID=1) всегда сохраняется.
 
@@ -180,9 +188,7 @@ async def delete_all_topics_except(
 
     Возвращает:
 
-        total_topics
-        deleted
-        errors
+        total_topics, deleted, errors
     """
 
     topics = await get_forum_topics(chat_id)
@@ -190,10 +196,11 @@ async def delete_all_topics_except(
     total_topics = len(topics)
     deleted = 0
     errors = 0
-    created = 0
+
+    throttle = AdaptiveThrottle(base_delay=1.0, max_delay=6.0)
 
     logger.info(
-        "Начинается очистка форума '%s'. Найдено веток: %d",
+        "Начинается удаление веток в '%s'. Найдено веток: %d",
         chat_id,
         total_topics,
     )
@@ -232,71 +239,158 @@ async def delete_all_topics_except(
         # УДАЛЕНИЕ
         # ==========================================================
 
-        try:
-            await bot.delete_forum_topic(
-                chat_id=chat_id,
-                message_thread_id=topic_id,
-            )
+        attempts = 0
+        success = False
 
-            deleted += 1
+        while attempts < 2 and not success:
+            try:
+                await bot.delete_forum_topic(
+                    chat_id=chat_id,
+                    message_thread_id=topic_id,
+                )
 
-            logger.info(
-                "Ветка удалена: '%s' (ID=%s)",
-                topic_title,
-                topic_id,
-            )
+                deleted += 1
+                success = True
 
-            # ==========================================================
-            # СОЗДАНИЕ ЗАМЕНЯЮЩЕЙ ВЕТКИ "АВЕ ИМП"
-            # ==========================================================
+                logger.info(
+                    "Ветка удалена: '%s' (ID=%s)",
+                    topic_title,
+                    topic_id,
+                )
 
-            if await create_replacement_topic(bot=bot, chat_id=chat_id):
-                created += 1
+            except TelegramRetryAfter as e:
+                logger.warning(
+                    "FloodWait %s секунд при удалении '%s' (ID=%s)",
+                    e.retry_after,
+                    topic_title,
+                    topic_id,
+                )
 
-            # Небольшая пауза, чтобы не спровоцировать flood-control
-            # при удалении+создании множества веток подряд.
-            await asyncio.sleep(0.5)
+                throttle.on_flood_wait(e.retry_after)
+                await asyncio.sleep(e.retry_after)
+                attempts += 1
 
-        except TelegramForbiddenError as e:
+            except TelegramForbiddenError as e:
+                errors += 1
+
+                logger.error(
+                    "Недостаточно прав для удаления "
+                    "'%s' (ID=%s): %s",
+                    topic_title,
+                    topic_id,
+                    e,
+                )
+                break
+
+            except TelegramBadRequest as e:
+                errors += 1
+
+                logger.error(
+                    "Telegram отклонил удаление "
+                    "'%s' (ID=%s): %s",
+                    topic_title,
+                    topic_id,
+                    e,
+                )
+                break
+
+            except Exception as e:
+                errors += 1
+
+                logger.exception(
+                    "Ошибка удаления "
+                    "'%s' (ID=%s): %s",
+                    topic_title,
+                    topic_id,
+                    e,
+                )
+                break
+
+        if not success and attempts >= 2:
             errors += 1
 
-            logger.error(
-                "Недостаточно прав для удаления "
-                "'%s' (ID=%s): %s",
-                topic_title,
-                topic_id,
-                e,
-            )
+        if success:
+            throttle.on_success()
 
-        except TelegramBadRequest as e:
-            errors += 1
-
-            logger.error(
-                "Telegram отклонил удаление "
-                "'%s' (ID=%s): %s",
-                topic_title,
-                topic_id,
-                e,
-            )
-
-        except Exception as e:
-            errors += 1
-
-            logger.exception(
-                "Ошибка удаления "
-                "'%s' (ID=%s): %s",
-                topic_title,
-                topic_id,
-                e,
-            )
+        # Адаптивная пауза между удалениями, чтобы не спровоцировать
+        # flood-control и анти-рейд системы Telegram.
+        await throttle.wait()
 
     logger.info(
-        "Очистка форума завершена: "
-        "найдено=%d, удалено=%d, создано=%d, ошибок=%d",
+        "Удаление веток завершено: найдено=%d, удалено=%d, ошибок=%d",
         total_topics,
         deleted,
+        errors,
+    )
+
+    return total_topics, deleted, errors
+
+
+async def create_replacement_topics(
+    bot: Bot,
+    chat_id: int,
+    count: int,
+):
+    """
+    Создаёт заменяющие ветки "АВЕ ИМП" — отдельным, самостоятельным
+    проходом после того, как удаление веток полностью завершено.
+
+    `count` — сколько веток было удалено; реальное число созданных
+    веток ограничено сверху MAX_REPLACEMENT_TOPICS независимо от
+    того, сколько удалено (см. константу выше).
+
+    Возвращает: created, errors
+    """
+
+    target = min(count, MAX_REPLACEMENT_TOPICS)
+
+    created = 0
+    errors = 0
+
+    throttle = AdaptiveThrottle(base_delay=1.0, max_delay=6.0)
+
+    logger.info(
+        "Начинается создание %d заменяющих веток в '%s' (удалено веток: %d)",
+        target,
+        chat_id,
+        count,
+    )
+
+    for _ in range(target):
+        attempts = 0
+        success = False
+
+        while attempts < 2 and not success:
+            try:
+                success = await create_replacement_topic(bot=bot, chat_id=chat_id)
+                if not success:
+                    break
+
+            except TelegramRetryAfter as e:
+                logger.warning(
+                    "FloodWait %s секунд при создании заменяющей ветки",
+                    e.retry_after,
+                )
+
+                throttle.on_flood_wait(e.retry_after)
+                await asyncio.sleep(e.retry_after)
+                attempts += 1
+
+        if success:
+            created += 1
+            throttle.on_success()
+        else:
+            errors += 1
+
+        # Адаптивная пауза между созданиями по той же причине, что
+        # и при удалении — не выглядеть для Telegram сплошной серией
+        # массовых административных действий.
+        await throttle.wait()
+
+    logger.info(
+        "Создание заменяющих веток завершено: создано=%d, ошибок=%d",
         created,
         errors,
     )
 
-    return total_topics, deleted, created, errors
+    return created, errors
