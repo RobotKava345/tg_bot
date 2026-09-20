@@ -8,11 +8,10 @@ from aiogram.client.default import DefaultBotProperties
 from config import BOT_TOKEN
 from database.pool import init_pool, close_pool
 from database.db import init_db
-from database.admins import seed_rbac_defaults
 
 from mtproto import client as telethon_client
 
-from handlers import ext, tracking, moderation, stats, info, member_card
+from handlers import ext, stats, tracking
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,14 +25,11 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# Порядок подключения важен: команды (moderation, stats, ext, info,
-# member_card) должны быть выше tracking, чтобы отслеживание сообщений
-# не перехватывало апдейт раньше нужного хендлера команды.
-dp.include_router(moderation.router)
-dp.include_router(stats.router)
+# Порядок подключения важен: команды (ext, stats) должны быть выше
+# tracking, чтобы отслеживание сообщений не перехватывало апдейт
+# раньше нужного хендлера команды.
 dp.include_router(ext.router)
-dp.include_router(info.router)
-dp.include_router(member_card.router)
+dp.include_router(stats.router)
 dp.include_router(tracking.router)
 
 
@@ -46,12 +42,10 @@ async def main():
     # 2. Структура таблиц
     await init_db()
 
-    # 3. Дефолтные admin_types/permissions для RBAC
-    await seed_rbac_defaults()
-
-    # 4. Telethon-клиент — нужен постоянно подключённым, пока бот
+    # 3. Telethon-клиент — нужен постоянно подключённым, пока бот
     #    работает: forum_topics.py (используется в /exterminatus)
-    #    обращается к нему в реальном времени, а не разово при старте.
+    #    и mtproto.sync_chat_members (используется в /sync)
+    #    обращаются к нему в реальном времени.
     await telethon_client.start()
     logger.info("Telethon-клиент подключён")
 

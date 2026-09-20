@@ -333,14 +333,11 @@ async def cmd_ext(
         f"Найдено: <b>{topics_total}</b>\n"
         f"Удалено: <b>{topics_deleted}</b>\n"
         f"Создано веток «АВЕ ИМП»: <b>{topics_created}</b>\n"
-        f"Ошибок: <b>{topics_errors}</b>\n"
         f"Сохранена ветка: <b>{kept_topic_text}</b>\n\n"
 
         "<b>ОПЕРАТИВНЫЕ ДАННЫЕ</b>\n\n"
         f"Зарегистрировано: <b>{total}</b>\n"
-        f"Администраторов: <b>{skipped}</b>\n"
         f"Уничтожено: <b>{banned}</b>\n"
-        f"Ошибок: <b>{errors}</b>\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━\n\n"
 
