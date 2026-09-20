@@ -1,19 +1,28 @@
-# Секреты и сессии — НИКОГДА не коммитить
+# Secrets
 .env
+.env.*
+!.env.example
+
+# Telethon sessions
 *.session
 *.session-journal
- 
-# База данных
+
+# Local databases
 *.db
 *.sqlite3
- 
+
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 venv/
 .venv/
- 
-# IDE
+
+# IDE / OS
 .vscode/
 .idea/
- 
+.DS_Store
+Thumbs.db

@@ -1,47 +1,49 @@
 import ssl
 
 import asyncpg
-from config import DATABASE_URL
 
-_pool = None
+from config import settings
 
-
-def _build_ssl_context() -> ssl.SSLContext:
-    """
-    Явный SSLContext вместо строки "require".
-
-    На некоторых сочетаниях версий asyncpg/Python строковый режим
-    ssl="require" не всегда надёжно транслируется в реальный TLS-
-    хендшейк, из-за чего сервер (Render Postgres и подобные) может
-    ответить InvalidAuthorizationSpecificationError: SSL/TLS required,
-    хотя код формально просит SSL. Явный SSLContext убирает эту
-    неоднозначность — TLS используется гарантированно, но без
-    проверки сертификата (аналог поведения sslmode=require в libpq).
-    """
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+_pool: asyncpg.Pool | None = None
 
 
-async def init_pool():
+def _ssl_context() -> ssl.SSLContext | None:
+    if not settings.database_ssl:
+        return None
+
+    # Compatible with managed PostgreSQL providers that require TLS.
+    # Certificate verification can be tightened for providers that
+    # publish a CA certificate.
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
+
+async def init_pool() -> None:
     global _pool
 
+    if _pool is not None:
+        return
+
     _pool = await asyncpg.create_pool(
-        dsn=DATABASE_URL,
+        dsn=settings.database_url,
         min_size=1,
         max_size=5,
         command_timeout=30,
-        ssl=_build_ssl_context(),
+        ssl=_ssl_context(),
     )
 
 
-async def close_pool():
+async def close_pool() -> None:
     global _pool
 
-    if _pool:
+    if _pool is not None:
         await _pool.close()
+        _pool = None
 
 
-def get_pool():
+def get_pool() -> asyncpg.Pool:
+    if _pool is None:
+        raise RuntimeError("Database pool is not initialized.")
     return _pool
